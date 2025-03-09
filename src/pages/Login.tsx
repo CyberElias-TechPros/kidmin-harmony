@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
 import { Users } from 'lucide-react';
+import { cn } from '@/lib/utils';
 
 interface LoginFormData {
   email: string;

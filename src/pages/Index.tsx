@@ -3,6 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { ArrowRight, Check, Users, CalendarCheck, BookOpen, Shield, Heart } from 'lucide-react';
+import { cn } from '@/lib/utils';
 
 const features = [
   {
