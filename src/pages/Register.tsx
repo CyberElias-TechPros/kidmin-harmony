@@ -1,8 +1,6 @@
-
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
-import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
@@ -16,6 +14,7 @@ import {
 import { toast } from 'sonner';
 import { Users } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { createUserWithEmail, updateUserProfile } from '@/services/firebase';
 
 interface RegisterFormData {
   name: string;
@@ -39,11 +38,28 @@ const Register = () => {
 
   const onSubmit = async (data: RegisterFormData) => {
     try {
-      // Registration would be handled here with actual auth
+      // Create user with email and password
+      await createUserWithEmail(data.email, data.password);
+      
+      // Update profile with name
+      await updateUserProfile(data.name);
+      
+      // Store role in localStorage for this user
+      localStorage.setItem(`user_role_${data.email}`, JSON.stringify({
+        role: role,
+        avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(data.name)}&background=6366f1&color=fff`
+      }));
+      
       toast.success(`Registration successful! Please sign in.`);
       navigate('/login');
-    } catch (error) {
-      toast.error('Registration failed. Please try again.');
+    } catch (error: any) {
+      console.error("Registration error:", error);
+      
+      if (error.code === 'auth/email-already-in-use') {
+        toast.error('This email is already registered. Please sign in.');
+      } else {
+        toast.error('Registration failed. Please try again.');
+      }
     }
   };
 
