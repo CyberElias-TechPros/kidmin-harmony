@@ -7,7 +7,9 @@ import {
   createUserWithEmailAndPassword,
   signOut,
   updateProfile,
-  UserCredential
+  UserCredential,
+  setPersistence,
+  browserLocalPersistence
 } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 import { getStorage } from "firebase/storage";
@@ -29,6 +31,12 @@ const analytics = getAnalytics(app);
 const auth = getAuth(app);
 const db = getFirestore(app);
 const storage = getStorage(app);
+
+// Set persistent auth state
+setPersistence(auth, browserLocalPersistence)
+  .catch((error) => {
+    console.error("Auth persistence error:", error);
+  });
 
 // Authentication functions
 export const loginWithEmail = async (email: string, password: string): Promise<UserCredential> => {

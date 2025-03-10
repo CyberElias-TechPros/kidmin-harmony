@@ -70,6 +70,9 @@ const DEMO_USERS = [
   }
 ];
 
+// Storage key for user session
+const USER_SESSION_KEY = 'kidmin_user_session';
+
 // Helper function to determine user role based on email domain or saved data
 const determineUserRole = (email: string, displayName?: string | null): User => {
   // For demo accounts, use predefined roles
@@ -117,6 +120,20 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
+  // Try to restore session from localStorage on initial load
+  useEffect(() => {
+    const savedSession = localStorage.getItem(USER_SESSION_KEY);
+    if (savedSession) {
+      try {
+        const sessionData = JSON.parse(savedSession);
+        setUser(sessionData);
+      } catch (error) {
+        console.error("Error parsing saved session:", error);
+        localStorage.removeItem(USER_SESSION_KEY);
+      }
+    }
+  }, []);
+
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
       if (firebaseUser) {
@@ -125,6 +142,9 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         if (email) {
           const userWithRole = determineUserRole(email, displayName);
           setUser(userWithRole);
+          
+          // Save session to localStorage
+          localStorage.setItem(USER_SESSION_KEY, JSON.stringify(userWithRole));
           
           // Store role if this is not a demo account
           if (!isDemoEmail(email)) {
@@ -136,6 +156,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         }
       } else {
         setUser(null);
+        localStorage.removeItem(USER_SESSION_KEY);
       }
       setIsLoading(false);
     });
@@ -166,13 +187,16 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         }
         
         // Set the demo user regardless of Firebase result
-        setUser({
+        const userData = {
           id: auth.currentUser?.uid || demoUser.id,
           name: demoUser.name,
           email: demoUser.email,
           role: demoUser.role,
           avatar: demoUser.avatar
-        });
+        };
+        
+        setUser(userData);
+        localStorage.setItem(USER_SESSION_KEY, JSON.stringify(userData));
         
         toast.success(`Welcome back, ${demoUser.name}!`);
       } else {
@@ -187,6 +211,8 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
           );
           
           setUser(userWithRole);
+          localStorage.setItem(USER_SESSION_KEY, JSON.stringify(userWithRole));
+          
           toast.success(`Welcome back, ${userWithRole.name}!`);
         }
       }
@@ -202,6 +228,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     try {
       await logoutUser();
       setUser(null);
+      localStorage.removeItem(USER_SESSION_KEY);
       toast.info('You have been logged out');
     } catch (error) {
       console.error("Logout error:", error);
