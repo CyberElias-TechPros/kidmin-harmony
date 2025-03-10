@@ -20,7 +20,9 @@ import {
   AlertTriangle,
   TrendingUp,
   Check,
-  UserPlus 
+  UserPlus,
+  HeartHandshake,
+  BarChart3
 } from 'lucide-react';
 
 // Mock data for dashboard stats
@@ -45,9 +47,30 @@ const mockStats = {
   }
 };
 
+// Mock data for parent dashboard
+const parentMockData = {
+  children: [
+    { id: '1', name: 'Emma Smith', age: 7, class: 'Elementary', attendance: 92 },
+    { id: '2', name: 'Noah Smith', age: 4, class: 'Pre-School', attendance: 88 }
+  ],
+  upcomingEvents: [
+    { id: '1', title: 'Bible Camp 2023', date: '2023-07-28' },
+    { id: '2', title: 'Christmas Concert', date: '2023-12-18' }
+  ],
+  currentLessons: [
+    { id: '1', title: 'Noah\'s Ark', completion: 75 },
+    { id: '2', title: 'Creation Story', completion: 100 }
+  ]
+};
+
 const Dashboard = () => {
   const { user } = useAuth();
   const navigate = useNavigate();
+
+  // Render different dashboard based on user role
+  if (user?.role === 'parent') {
+    return <ParentDashboard data={parentMockData} />;
+  }
 
   return (
     <div className="space-y-6">
@@ -251,6 +274,28 @@ const Dashboard = () => {
                 Add New Lesson
                 <BookOpen className="h-4 w-4" />
               </Button>
+
+              {user?.role === 'admin' && (
+                <>
+                  <Button 
+                    variant="outline" 
+                    className="w-full justify-between"
+                    onClick={() => navigate('/partners')}
+                  >
+                    Manage Partners
+                    <HeartHandshake className="h-4 w-4" />
+                  </Button>
+                  
+                  <Button 
+                    variant="outline" 
+                    className="w-full justify-between"
+                    onClick={() => navigate('/reports')}
+                  >
+                    View Reports
+                    <BarChart3 className="h-4 w-4" />
+                  </Button>
+                </>
+              )}
             </CardContent>
           </Card>
 
@@ -294,13 +339,154 @@ const Dashboard = () => {
               <Button 
                 variant="link" 
                 className="w-full flex items-center justify-center"
-                onClick={() => {}}
+                onClick={() => navigate('/reports')}
               >
                 View Full Reports <ArrowRight className="ml-2 h-4 w-4" />
               </Button>
             </CardFooter>
           </Card>
         </div>
+      </div>
+    </div>
+  );
+};
+
+// Parent-specific dashboard component
+const ParentDashboard = ({ data }: { data: typeof parentMockData }) => {
+  const { user } = useAuth();
+  const navigate = useNavigate();
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col space-y-2">
+        <h1 className="text-3xl font-bold">Welcome, {user?.name}</h1>
+        <p className="text-muted-foreground">
+          Here's what's happening with your children
+        </p>
+      </div>
+
+      {/* Children Cards */}
+      <div className="space-y-4">
+        <h2 className="text-xl font-semibold">Your Children</h2>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {data.children.map(child => (
+            <Card key={child.id}>
+              <CardHeader className="pb-2">
+                <CardTitle>{child.name}</CardTitle>
+                <CardDescription>{child.age} years old • {child.class} Class</CardDescription>
+              </CardHeader>
+              <CardContent className="pb-3">
+                <div className="space-y-3">
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-sm">
+                      <span>Attendance Rate:</span>
+                      <span className="font-medium">{child.attendance}%</span>
+                    </div>
+                    <div className="w-full h-2 bg-secondary rounded-full overflow-hidden">
+                      <div 
+                        className="bg-primary h-full rounded-full" 
+                        style={{ width: `${child.attendance}%` }}
+                      ></div>
+                    </div>
+                  </div>
+                </div>
+              </CardContent>
+              <CardFooter>
+                <Button 
+                  variant="outline" 
+                  className="w-full"
+                  onClick={() => navigate(`/children/${child.id}`)}
+                >
+                  View Details
+                </Button>
+              </CardFooter>
+            </Card>
+          ))}
+        </div>
+      </div>
+
+      {/* Upcoming Events */}
+      <div className="space-y-4">
+        <h2 className="text-xl font-semibold">Upcoming Events</h2>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {data.upcomingEvents.map(event => (
+            <Card key={event.id}>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-lg">{event.title}</CardTitle>
+                <CardDescription className="flex items-center">
+                  <Calendar className="h-3.5 w-3.5 mr-1" />
+                  {new Date(event.date).toLocaleDateString('en-US', { 
+                    weekday: 'long',
+                    month: 'long',
+                    day: 'numeric',
+                    year: 'numeric'
+                  })}
+                </CardDescription>
+              </CardHeader>
+              <CardFooter className="pt-2">
+                <Button 
+                  variant="outline" 
+                  className="w-full"
+                  onClick={() => navigate(`/events/${event.id}`)}
+                >
+                  View Event Details
+                </Button>
+              </CardFooter>
+            </Card>
+          ))}
+        </div>
+        <Button 
+          variant="ghost" 
+          className="w-full mt-2"
+          onClick={() => navigate('/events')}
+        >
+          View All Events <ArrowRight className="ml-2 h-4 w-4" />
+        </Button>
+      </div>
+
+      {/* Current Lessons */}
+      <div className="space-y-4">
+        <h2 className="text-xl font-semibold">Current Lessons</h2>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {data.currentLessons.map(lesson => (
+            <Card key={lesson.id}>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-lg">{lesson.title}</CardTitle>
+                <CardDescription>Progress</CardDescription>
+              </CardHeader>
+              <CardContent className="pb-3">
+                <div className="space-y-1">
+                  <div className="flex justify-between text-sm">
+                    <span>Completion:</span>
+                    <span className="font-medium">{lesson.completion}%</span>
+                  </div>
+                  <div className="w-full h-2 bg-secondary rounded-full overflow-hidden">
+                    <div 
+                      className="bg-primary h-full rounded-full" 
+                      style={{ width: `${lesson.completion}%` }}
+                    ></div>
+                  </div>
+                </div>
+              </CardContent>
+              <CardFooter>
+                <Button 
+                  variant="outline" 
+                  className="w-full"
+                  onClick={() => navigate(`/lessons/${lesson.id}`)}
+                >
+                  View Lesson Details
+                </Button>
+              </CardFooter>
+            </Card>
+          ))}
+        </div>
+        <Button 
+          variant="ghost" 
+          className="w-full mt-2"
+          onClick={() => navigate('/lessons')}
+        >
+          View All Lessons <ArrowRight className="ml-2 h-4 w-4" />
+        </Button>
       </div>
     </div>
   );

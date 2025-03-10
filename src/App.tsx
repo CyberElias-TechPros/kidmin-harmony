@@ -22,10 +22,17 @@ import AddEvent from "./pages/events/AddEvent";
 import Curriculum from "./pages/curriculum/Curriculum";
 import LessonDetails from "./pages/curriculum/LessonDetails";
 import AddLesson from "./pages/curriculum/AddLesson";
+import Partners from "./pages/partners/Partners";
+import Reports from "./pages/reports/Reports";
 
-// Protected route wrapper
-const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
-  const { isAuthenticated, isLoading } = useAuth();
+// Protected route wrapper with role-based access control
+interface ProtectedRouteProps {
+  children: React.ReactNode;
+  allowedRoles?: string[];
+}
+
+const ProtectedRoute = ({ children, allowedRoles }: ProtectedRouteProps) => {
+  const { isAuthenticated, isLoading, user } = useAuth();
 
   if (isLoading) {
     return <div>Loading...</div>;
@@ -33,6 +40,11 @@ const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
 
   if (!isAuthenticated) {
     return <Navigate to="/login" />;
+  }
+
+  // Check if user has required role (if roles are specified)
+  if (allowedRoles && user && !allowedRoles.includes(user.role)) {
+    return <Navigate to="/dashboard" />;
   }
 
   return <Layout>{children}</Layout>;
@@ -118,7 +130,7 @@ const App = () => (
             <Route
               path="/events/add"
               element={
-                <ProtectedRoute>
+                <ProtectedRoute allowedRoles={['admin', 'teacher']}>
                   <AddEvent />
                 </ProtectedRoute>
               }
@@ -144,7 +156,7 @@ const App = () => (
             <Route
               path="/lessons/add"
               element={
-                <ProtectedRoute>
+                <ProtectedRoute allowedRoles={['admin', 'teacher']}>
                   <AddLesson />
                 </ProtectedRoute>
               }
@@ -154,6 +166,26 @@ const App = () => (
               element={
                 <ProtectedRoute>
                   <LessonDetails />
+                </ProtectedRoute>
+              }
+            />
+            
+            {/* Partners - Admin only */}
+            <Route
+              path="/partners"
+              element={
+                <ProtectedRoute allowedRoles={['admin']}>
+                  <Partners />
+                </ProtectedRoute>
+              }
+            />
+            
+            {/* Reports - Admin and Teacher only */}
+            <Route
+              path="/reports"
+              element={
+                <ProtectedRoute allowedRoles={['admin', 'teacher']}>
+                  <Reports />
                 </ProtectedRoute>
               }
             />
