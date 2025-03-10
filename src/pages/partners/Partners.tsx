@@ -65,6 +65,20 @@ const partnersMockData = [
   },
 ];
 
+// Move getPartnerTypeIcon outside the component so it can be used by both components
+const getPartnerTypeIcon = (type: string) => {
+  switch(type) {
+    case 'Financial':
+      return <DollarSign className="h-4 w-4 text-green-500" />;
+    case 'Resource':
+      return <Building className="h-4 w-4 text-blue-500" />;
+    case 'Service':
+      return <HeartHandshake className="h-4 w-4 text-purple-500" />;
+    default:
+      return <HeartHandshake className="h-4 w-4" />;
+  }
+};
+
 const Partners = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeTab, setActiveTab] = useState('active');
@@ -77,19 +91,6 @@ const Partners = () => {
      partner.contactPerson.toLowerCase().includes(searchQuery.toLowerCase()) ||
      partner.partnershipType.toLowerCase().includes(searchQuery.toLowerCase()))
   );
-  
-  const getPartnerTypeIcon = (type: string) => {
-    switch(type) {
-      case 'Financial':
-        return <DollarSign className="h-4 w-4 text-green-500" />;
-      case 'Resource':
-        return <Building className="h-4 w-4 text-blue-500" />;
-      case 'Service':
-        return <HeartHandshake className="h-4 w-4 text-purple-500" />;
-      default:
-        return <HeartHandshake className="h-4 w-4" />;
-    }
-  };
 
   return (
     <div className="space-y-6">
