@@ -23,9 +23,10 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Separator } from '@/components/ui/separator';
-import { toast } from 'sonner';
 import { ArrowLeft, Save } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useCreateChild } from '@/services/api/hooks';
+import type { ChildInput } from '@/services/api/types';
 
 interface ChildFormData {
   firstName: string;
@@ -51,6 +52,7 @@ interface ChildFormData {
 
 const AddChild = () => {
   const navigate = useNavigate();
+  const createChild = useCreateChild();
   const {
     register,
     handleSubmit,
@@ -63,16 +65,34 @@ const AddChild = () => {
   const [churchMember, setChurchMember] = React.useState<boolean>(false);
 
   const onSubmit = async (data: ChildFormData) => {
-    // In a real app, we would save the data to the database
+    const payload: ChildInput = {
+      firstName: data.firstName,
+      lastName: data.lastName,
+      dob: data.dob,
+      gender,
+      ageGroup,
+      allergies: data.allergies || undefined,
+      medicalNotes: data.medicalNotes || undefined,
+      churchMember,
+      parentFirstName: data.parentFirstName,
+      parentLastName: data.parentLastName,
+      parentEmail: data.parentEmail,
+      parentPhone: data.parentPhone,
+      address: data.address,
+      city: data.city,
+      state: data.state,
+      zipCode: data.zipCode,
+      emergencyContactName: data.emergencyContactName,
+      emergencyContactRelation: data.emergencyContactRelation,
+      emergencyContactPhone: data.emergencyContactPhone,
+    };
+
     try {
-      // Simulate API call
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      console.log('Form submitted with:', data);
-      
-      toast.success('Child registered successfully!');
+      await createChild.mutateAsync(payload);
       navigate('/children');
     } catch (error) {
-      toast.error('Failed to register child. Please try again.');
+      // toast handled in hook
+      console.error('Failed to register child:', error);
     }
   };
 

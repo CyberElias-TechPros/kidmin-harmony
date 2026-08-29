@@ -1,69 +1,91 @@
-# Welcome to your Lovable project
+# KidMin Harmony
 
-## Project info
+A children's ministry management app: register and manage children, track
+attendance (QR + manual check-in), plan events, build a curriculum, administer
+ministry partners and view reports.
 
-**URL**: https://lovable.dev/projects/bfad817a-2cd1-4c0f-8b2b-89bbdc25b89d
+**Stack**
 
-## How can I edit this code?
+- **Frontend** — React 18 + TypeScript + Vite + Tailwind CSS + shadcn/ui +
+  TanStack Query + React Router. Deployed to **Vercel**.
+- **Backend** — Cloudflare **Workers** + **D1** (SQLite) + **R2** (files).
+  Deployed to **Cloudflare**.
 
-There are several ways of editing your application.
+## Layout
 
-**Use Lovable**
-
-Simply visit the [Lovable Project](https://lovable.dev/projects/bfad817a-2cd1-4c0f-8b2b-89bbdc25b89d) and start prompting.
-
-Changes made via Lovable will be committed automatically to this repo.
-
-**Use your preferred IDE**
-
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
-
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
-
-Follow these steps:
-
-```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
-
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
-
-# Step 3: Install the necessary dependencies.
-npm i
-
-# Step 4: Start the development server with auto-reloading and an instant preview.
-npm run dev
+```
+.
+├── src/                 # React frontend (Vercel)
+│   └── services/api/    # API client + React Query hooks
+├── worker/              # Cloudflare Worker backend (D1 + R2)
+│   ├── migrations/      # D1 SQL migrations
+│   └── src/index.ts     # Hono API
+├── vercel.json          # SPA routing + /api proxy to the Worker
+└── .env.example         # example environment variables
 ```
 
-**Edit a file directly in GitHub**
+## Run locally (full stack)
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+Backend (terminal 1):
 
-**Use GitHub Codespaces**
+```bash
+cd worker
+npm install
+cp .dev.vars.example .dev.vars   # set JWT_SECRET (see worker/README.md)
+npm run db:migrate:local
+npm run dev                       # http://127.0.0.1:8787
+```
 
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
+Seed demo accounts (once):
 
-## What technologies are used for this project?
+```bash
+curl -X POST http://127.0.0.1:8787/api/auth/seed
+```
 
-This project is built with .
+Frontend (terminal 2, from repo root):
 
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
+```bash
+npm install
+npm run dev                       # http://localhost:8080 (proxies /api)
+```
 
-## How can I deploy this project?
+Demo logins: `admin@church.org / admin123`, `teacher@church.org / teacher123`,
+`parent@church.org / parent123`.
 
-Simply open [Lovable](https://lovable.dev/projects/bfad817a-2cd1-4c0f-8b2b-89bbdc25b89d) and click on Share -> Publish.
+Or use the one-click demo buttons on the login page.
 
-## I want to use a custom domain - is that possible?
+## Deploying
 
-We don't support custom domains (yet). If you want to deploy your project under your own domain then we recommend using Netlify. Visit our docs for more details: [Custom domains](https://docs.lovable.dev/tips-tricks/custom-domain/)
+### Backend → Cloudflare
+
+Follow `worker/README.md`: create the D1 database and R2 bucket, set
+`JWT_SECRET`, run the migrations, then `npm run deploy`. Disable `SEED_DEMO` in
+production.
+
+### Frontend → Vercel
+
+1. Import the repo into Vercel (framework: Vite).
+2. Set the `WORKER_URL` environment variable to your deployed Worker's host
+   (e.g. `kidmin-harmony-api.your-subdomain.workers.dev`). Vercel rewrites
+   `/api/*` and `/media/*` to it, so the frontend needs no other config and
+   there are no CORS issues.
+   - Alternatively, unset `WORKER_URL` and instead set `VITE_API_URL` to the
+     full Worker URL (e.g. `https://...workers.dev`) and add your Vercel origin
+     to the Worker's `ALLOWED_ORIGINS`.
+
+## Environment variables
+
+See `.env.example`.
+
+## Roles & access
+
+- **admin** — full access (children, attendance, events, lessons, partners, reports).
+- **teacher** — children, attendance, events, lessons, reports.
+- **volunteer / cellLeader** — children, attendance (check-in).
+- **parent** — sees only their registered children, can view curriculum and
+  register their children for events.
+
+> **Security:** Public self-registration is restricted to **parents** only. Staff
+> and admin accounts (teacher, volunteer, cell leader, partner) hold access to
+> children's sensitive data and must be provisioned by an administrator — they
+> cannot be created through the sign-up form or the `/api/auth/register` endpoint.

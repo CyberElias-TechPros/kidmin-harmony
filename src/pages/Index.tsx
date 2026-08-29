@@ -39,7 +39,7 @@ const Index = () => {
 
   useEffect(() => {
     const revealItems = () => {
-      let newVisibleItems: number[] = [];
+      const newVisibleItems: number[] = [];
       features.forEach((_, index) => {
         setTimeout(() => {
           setVisibleItems(prev => [...prev, index]);
