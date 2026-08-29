@@ -1,29 +1,13 @@
-
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect } from "react";
 import { toast } from "sonner";
-import { 
-  User as FirebaseUser, 
-  onAuthStateChanged,
-} from "firebase/auth";
-import { 
-  auth, 
-  loginWithEmail, 
-  logoutUser,
-  isDemoEmail 
-} from '@/services/firebase';
-
-export interface User {
-  id: string;
-  name: string;
-  email: string;
-  role: 'admin' | 'teacher' | 'parent' | 'volunteer' | 'cellLeader' | 'partner';
-  avatar?: string;
-}
+import { authApi, setToken, getToken, ApiError } from "@/services/api/client";
+import type { User, Role } from "@/services/api/types";
 
 interface AuthContextType {
   user: User | null;
   login: (email: string, password: string) => Promise<void>;
-  logout: () => void;
+  register: (name: string, email: string, password: string, role: Role) => Promise<void>;
+  logout: () => Promise<void>;
   isLoading: boolean;
   isAuthenticated: boolean;
 }
@@ -31,194 +15,97 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType>({
   user: null,
   login: async () => {},
-  logout: () => {},
+  register: async () => {},
+  logout: async () => {},
   isLoading: true,
   isAuthenticated: false,
 });
 
 export const useAuth = () => useContext(AuthContext);
 
+const USER_SESSION_KEY = "kidmin_user_session";
+
 interface AuthProviderProps {
   children: React.ReactNode;
 }
 
-// Demo users for demonstration purposes
-const DEMO_USERS = [
-  {
-    id: '1',
-    name: 'Admin User',
-    email: 'admin@church.org',
-    password: 'admin123',
-    role: 'admin' as const,
-    avatar: 'https://ui-avatars.com/api/?name=Admin+User&background=6366f1&color=fff',
-  },
-  {
-    id: '2',
-    name: 'Teacher Smith',
-    email: 'teacher@church.org',
-    password: 'teacher123',
-    role: 'teacher' as const,
-    avatar: 'https://ui-avatars.com/api/?name=Teacher+Smith&background=6366f1&color=fff',
-  },
-  {
-    id: '3',
-    name: 'Parent Jones',
-    email: 'parent@church.org',
-    password: 'parent123',
-    role: 'parent' as const,
-    avatar: 'https://ui-avatars.com/api/?name=Parent+Jones&background=6366f1&color=fff',
+const loadCachedUser = (): User | null => {
+  try {
+    const raw = localStorage.getItem(USER_SESSION_KEY);
+    return raw ? (JSON.parse(raw) as User) : null;
+  } catch {
+    return null;
   }
-];
-
-// Storage key for user session
-const USER_SESSION_KEY = 'kidmin_user_session';
-
-// Helper function to determine user role based on email domain or saved data
-const determineUserRole = (email: string, displayName?: string | null): User => {
-  // For demo accounts, use predefined roles
-  if (isDemoEmail(email)) {
-    const demoUser = DEMO_USERS.find(u => u.email === email);
-    if (demoUser) {
-      return {
-        id: auth.currentUser?.uid || demoUser.id,
-        name: demoUser.name,
-        email: email,
-        role: demoUser.role,
-        avatar: demoUser.avatar
-      };
-    }
-  }
-  
-  // For real users, determine role based on stored value or provide default
-  const storedUserData = localStorage.getItem(`user_role_${email}`);
-  if (storedUserData) {
-    try {
-      const userData = JSON.parse(storedUserData);
-      return {
-        id: auth.currentUser?.uid || '',
-        name: displayName || email.split('@')[0],
-        email: email,
-        role: userData.role,
-        avatar: userData.avatar || `https://ui-avatars.com/api/?name=${encodeURIComponent(displayName || email)}&background=6366f1&color=fff`
-      };
-    } catch (error) {
-      console.error("Error parsing stored user data:", error);
-    }
-  }
-  
-  // Default for new users
-  return {
-    id: auth.currentUser?.uid || '',
-    name: displayName || email.split('@')[0],
-    email: email,
-    role: 'parent' as const, // Default role
-    avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(displayName || email)}&background=6366f1&color=fff`
-  };
 };
 
 export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
-  const [user, setUser] = useState<User | null>(null);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [user, setUser] = useState<User | null>(() => (getToken() ? loadCachedUser() : null));
+  const [isLoading, setIsLoading] = useState<boolean>(!!getToken());
 
-  // Try to restore session from localStorage on initial load
+  // Restore / validate the session on initial load.
   useEffect(() => {
-    const savedSession = localStorage.getItem(USER_SESSION_KEY);
-    if (savedSession) {
-      try {
-        const sessionData = JSON.parse(savedSession);
-        setUser(sessionData);
-      } catch (error) {
-        console.error("Error parsing saved session:", error);
-        localStorage.removeItem(USER_SESSION_KEY);
-      }
-    }
-  }, []);
-
-  useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
-      if (firebaseUser) {
-        const { email, displayName, uid } = firebaseUser;
-        
-        if (email) {
-          const userWithRole = determineUserRole(email, displayName);
-          setUser(userWithRole);
-          
-          // Save session to localStorage
-          localStorage.setItem(USER_SESSION_KEY, JSON.stringify(userWithRole));
-          
-          // Store role if this is not a demo account
-          if (!isDemoEmail(email)) {
-            localStorage.setItem(`user_role_${email}`, JSON.stringify({
-              role: userWithRole.role,
-              avatar: userWithRole.avatar
-            }));
-          }
-        }
-      } else {
-        setUser(null);
-        localStorage.removeItem(USER_SESSION_KEY);
-      }
+    const token = getToken();
+    if (!token) {
       setIsLoading(false);
-    });
+      return;
+    }
 
-    return () => unsubscribe();
+    let cancelled = false;
+    authApi
+      .me()
+      .then((res) => {
+        if (cancelled) return;
+        setUser(res.user);
+        localStorage.setItem(USER_SESSION_KEY, JSON.stringify(res.user));
+        setIsLoading(false);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        if (err instanceof ApiError && err.status === 401) {
+          setToken(null);
+          setUser(null);
+          localStorage.removeItem(USER_SESSION_KEY);
+        } else {
+          // Network hiccup: fall back to the cached user so the app stays usable.
+          setUser(loadCachedUser());
+        }
+        setIsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const login = async (email: string, password: string) => {
     setIsLoading(true);
-    
     try {
-      if (isDemoEmail(email)) {
-        // For demo accounts, check against our predefined list
-        const demoUser = DEMO_USERS.find(
-          u => u.email === email && u.password === password
-        );
-        
-        if (!demoUser) {
-          throw new Error('Invalid demo credentials');
-        }
-        
-        // Still log in with Firebase in case the account exists
-        try {
-          await loginWithEmail(email, password);
-        } catch (firebaseError) {
-          console.log("Demo user not in Firebase, would create account in production");
-          // In a real app, we might create the account here
-        }
-        
-        // Set the demo user regardless of Firebase result
-        const userData = {
-          id: auth.currentUser?.uid || demoUser.id,
-          name: demoUser.name,
-          email: demoUser.email,
-          role: demoUser.role,
-          avatar: demoUser.avatar
-        };
-        
-        setUser(userData);
-        localStorage.setItem(USER_SESSION_KEY, JSON.stringify(userData));
-        
-        toast.success(`Welcome back, ${demoUser.name}!`);
-      } else {
-        // For real users, authenticate with Firebase
-        const userCredential = await loginWithEmail(email, password);
-        const { user: firebaseUser } = userCredential;
-        
-        if (firebaseUser.email) {
-          const userWithRole = determineUserRole(
-            firebaseUser.email, 
-            firebaseUser.displayName
-          );
-          
-          setUser(userWithRole);
-          localStorage.setItem(USER_SESSION_KEY, JSON.stringify(userWithRole));
-          
-          toast.success(`Welcome back, ${userWithRole.name}!`);
-        }
-      }
-    } catch (error) {
-      toast.error('Invalid email or password');
-      throw error;
+      const { token, user: resUser } = await authApi.login(email, password);
+      setToken(token);
+      setUser(resUser);
+      localStorage.setItem(USER_SESSION_KEY, JSON.stringify(resUser));
+      toast.success(`Welcome back, ${resUser.name}!`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Invalid email or password";
+      toast.error(message);
+      throw err;
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const register = async (name: string, email: string, password: string, role: Role) => {
+    setIsLoading(true);
+    try {
+      const { token, user: resUser } = await authApi.register({ name, email, password, role });
+      setToken(token);
+      setUser(resUser);
+      localStorage.setItem(USER_SESSION_KEY, JSON.stringify(resUser));
+      toast.success(`Welcome, ${resUser.name}!`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Registration failed";
+      toast.error(message);
+      throw err;
     } finally {
       setIsLoading(false);
     }
@@ -226,24 +113,20 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
 
   const logout = async () => {
     try {
-      await logoutUser();
-      setUser(null);
-      localStorage.removeItem(USER_SESSION_KEY);
-      toast.info('You have been logged out');
-    } catch (error) {
-      console.error("Logout error:", error);
-      toast.error('Error logging out');
+      await authApi.logout();
+    } catch {
+      // Swallow network errors on logout; we still clear the local session.
     }
+    setToken(null);
+    setUser(null);
+    localStorage.removeItem(USER_SESSION_KEY);
+    toast.info("You have been logged out");
   };
 
   return (
-    <AuthContext.Provider value={{ 
-      user, 
-      login, 
-      logout, 
-      isLoading,
-      isAuthenticated: !!user
-    }}>
+    <AuthContext.Provider
+      value={{ user, login, register, logout, isLoading, isAuthenticated: !!user }}
+    >
       {children}
     </AuthContext.Provider>
   );

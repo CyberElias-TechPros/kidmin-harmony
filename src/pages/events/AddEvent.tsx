@@ -29,12 +29,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { toast } from 'sonner';
 import { Calendar, ArrowLeft, Upload } from 'lucide-react';
 import { format } from 'date-fns';
 import { cn } from '@/lib/utils';
 import { Calendar as CalendarComponent } from '@/components/ui/calendar';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { useCreateEvent } from '@/services/api/hooks';
+import { api } from '@/services/api/client';
+import type { Event } from '@/services/api/types';
 
 interface EventFormData {
   title: string;
@@ -53,6 +55,7 @@ interface EventFormData {
 
 const AddEvent = () => {
   const navigate = useNavigate();
+  const createEvent = useCreateEvent();
   const form = useForm<EventFormData>({
     defaultValues: {
       title: '',
@@ -69,10 +72,34 @@ const AddEvent = () => {
     }
   });
   
-  const onSubmit = (data: EventFormData) => {
-    console.log(data);
-    toast.success('Event created successfully!');
-    navigate('/events');
+  const onSubmit = async (data: EventFormData) => {
+    try {
+      let imageUrl: string | undefined;
+      if (data.eventImage && data.eventImage.length > 0) {
+        const file = data.eventImage[0];
+        const res = await api.upload<{ url: string }>('/upload', file);
+        imageUrl = res.url;
+      }
+
+      const payload: Partial<Event> = {
+        title: data.title,
+        startDate: format(data.startDate, 'yyyy-MM-dd'),
+        endDate: format(data.endDate, 'yyyy-MM-dd'),
+        startTime: data.startTime,
+        endTime: data.endTime,
+        location: data.location,
+        address: data.address,
+        description: data.description,
+        capacity: data.capacity,
+        ageGroup: data.ageGroup,
+        requiresRegistration: data.requiresRegistration === 'yes',
+        imageUrl,
+      };
+      await createEvent.mutateAsync(payload);
+      navigate('/events');
+    } catch (error) {
+      console.error('Failed to create event:', error);
+    }
   };
 
   return (

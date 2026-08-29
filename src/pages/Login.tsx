@@ -101,13 +101,50 @@ const Login = () => {
           </form>
 
           <div className="mt-6">
-            <p className="text-center text-sm text-muted-foreground">
-              Demo Account Credentials:
-            </p>
-            <div className="mt-2 space-y-1 text-sm text-muted-foreground">
-              <p>Admin: admin@church.org / admin123</p>
-              <p>Teacher: teacher@church.org / teacher123</p>
-              <p>Parent: parent@church.org / parent123</p>
+            <div className="relative my-4">
+              <div className="absolute inset-0 flex items-center">
+                <span className="w-full border-t" />
+              </div>
+              <div className="relative flex justify-center text-xs uppercase">
+                <span className="bg-background px-2 text-muted-foreground">
+                  Or try a demo account
+                </span>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full justify-start"
+                onClick={() => login("admin@church.org", "admin123").then(() => navigate("/dashboard"))}
+                disabled={isSubmitting}
+              >
+                <span className="mr-2 inline-block h-2 w-2 rounded-full bg-purple-500" />
+                <span className="font-medium">Admin</span>
+                <span className="ml-auto text-xs text-muted-foreground">admin@church.org</span>
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full justify-start"
+                onClick={() => login("teacher@church.org", "teacher123").then(() => navigate("/dashboard"))}
+                disabled={isSubmitting}
+              >
+                <span className="mr-2 inline-block h-2 w-2 rounded-full bg-blue-500" />
+                <span className="font-medium">Teacher</span>
+                <span className="ml-auto text-xs text-muted-foreground">teacher@church.org</span>
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full justify-start"
+                onClick={() => login("parent@church.org", "parent123").then(() => navigate("/dashboard"))}
+                disabled={isSubmitting}
+              >
+                <span className="mr-2 inline-block h-2 w-2 rounded-full bg-green-500" />
+                <span className="font-medium">Parent</span>
+                <span className="ml-auto text-xs text-muted-foreground">parent@church.org</span>
+              </Button>
             </div>
           </div>
         </div>

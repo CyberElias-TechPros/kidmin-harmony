@@ -4,28 +4,20 @@ import { useForm } from 'react-hook-form';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
-import { 
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
-import { toast } from 'sonner';
-import { Users } from 'lucide-react';
+import { useAuth } from '@/contexts/AuthContext';
+import { Users, Info } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { createUserWithEmail, updateUserProfile } from '@/services/firebase';
 
 interface RegisterFormData {
   name: string;
   email: string;
   password: string;
   confirmPassword: string;
-  role: 'parent' | 'teacher' | 'volunteer' | 'cellLeader' | 'partner';
 }
 
 const Register = () => {
   const navigate = useNavigate();
+  const { register: registerUser } = useAuth();
   const {
     register,
     handleSubmit,
@@ -33,33 +25,17 @@ const Register = () => {
     formState: { errors, isSubmitting }
   } = useForm<RegisterFormData>();
 
-  // For the select component - role selection
-  const [role, setRole] = React.useState<RegisterFormData['role']>('parent');
+  // Parent sign-up is the default for public registration. Staff accounts
+  // (teacher, volunteer, cell leader, partner) are provisioned by an admin.
+  const role = 'parent' as const;
 
   const onSubmit = async (data: RegisterFormData) => {
     try {
-      // Create user with email and password
-      await createUserWithEmail(data.email, data.password);
-      
-      // Update profile with name
-      await updateUserProfile(data.name);
-      
-      // Store role in localStorage for this user
-      localStorage.setItem(`user_role_${data.email}`, JSON.stringify({
-        role: role,
-        avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(data.name)}&background=6366f1&color=fff`
-      }));
-      
-      toast.success(`Registration successful! Please sign in.`);
-      navigate('/login');
-    } catch (error: any) {
+      await registerUser(data.name, data.email, data.password, role);
+      navigate('/dashboard');
+    } catch (error) {
+      // Error handling is done in AuthContext
       console.error("Registration error:", error);
-      
-      if (error.code === 'auth/email-already-in-use') {
-        toast.error('This email is already registered. Please sign in.');
-      } else {
-        toast.error('Registration failed. Please try again.');
-      }
     }
   };
 
@@ -115,23 +91,12 @@ const Register = () => {
               )}
             </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="role">Role</Label>
-              <Select 
-                value={role}
-                onValueChange={(value) => setRole(value as RegisterFormData['role'])}
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue placeholder="Select your role" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="parent">Parent</SelectItem>
-                  <SelectItem value="teacher">Teacher</SelectItem>
-                  <SelectItem value="volunteer">Volunteer</SelectItem>
-                  <SelectItem value="cellLeader">Cell Leader</SelectItem>
-                  <SelectItem value="partner">Ministry Partner</SelectItem>
-                </SelectContent>
-              </Select>
+            <div className="space-y-2 flex items-start gap-2 rounded-md bg-muted p-3 text-sm text-muted-foreground">
+              <Info className="h-4 w-4 mt-0.5 shrink-0" />
+              <p>
+                You're signing up as a <span className="font-medium text-foreground">parent</span>.
+                Teacher and staff accounts are created by your ministry administrator.
+              </p>
             </div>
 
             <div className="space-y-2">

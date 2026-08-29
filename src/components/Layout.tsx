@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import ThemeToggle from '@/components/ThemeToggle';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -27,7 +28,7 @@ interface NavItem {
 const navItems: NavItem[] = [
   { title: 'Dashboard', href: '/dashboard', icon: <Home className="h-5 w-5" /> },
   { title: 'Children', href: '/children', icon: <Users className="h-5 w-5" /> },
-  { title: 'Attendance', href: '/attendance', icon: <CalendarCheck className="h-5 w-5" /> },
+  { title: 'Attendance', href: '/attendance', icon: <CalendarCheck className="h-5 w-5" />, roles: ['admin', 'teacher', 'volunteer', 'cellLeader'] },
   { title: 'Lessons', href: '/lessons', icon: <BookOpen className="h-5 w-5" /> },
   { title: 'Events', href: '/events', icon: <Calendar className="h-5 w-5" /> },
   { title: 'Partners', href: '/partners', icon: <HeartHandshake className="h-5 w-5" />, roles: ['admin'] },
@@ -112,6 +113,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             ))}
           </nav>
           
+          <ThemeToggle />
           {user ? (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>

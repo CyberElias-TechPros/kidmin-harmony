@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Separator } from '@/components/ui/separator';
 import { ArrowLeft, Plus, Trash2, Calendar, Clock, Upload } from 'lucide-react';
 import { toast } from 'sonner';
+import { useCreateLesson } from '@/services/api/hooks';
 
 interface Activity {
   id: string;
@@ -31,6 +32,7 @@ interface Objective {
 
 const AddLesson = () => {
   const navigate = useNavigate();
+  const createLesson = useCreateLesson();
   
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
@@ -110,7 +112,7 @@ const AddLesson = () => {
     ));
   };
   
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
     // Validation
@@ -162,11 +164,27 @@ const AddLesson = () => {
       }
     }
     
-    // Success - in a real app, we would call an API here
-    toast.success("Lesson created successfully!");
-    
-    // Redirect back to the lessons page
-    navigate('/lessons');
+    // Success - save to the API
+    try {
+      await createLesson.mutateAsync({
+        title: title.trim(),
+        description,
+        ageGroup,
+        date,
+        duration: parseInt(duration, 10),
+        objectives: objectives.map((o) => o.text),
+        materials: materials.map((m) => m.name),
+        activities: activities.map((a) => ({
+          name: a.name,
+          description: a.description,
+          duration: a.duration,
+          materials: a.materials ? [a.materials] : [],
+        })),
+      });
+      navigate('/lessons');
+    } catch (error) {
+      console.error('Failed to create lesson:', error);
+    }
   };
   
   return (

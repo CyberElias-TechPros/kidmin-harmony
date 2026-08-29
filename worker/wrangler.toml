@@ -1,0 +1,34 @@
+# Cloudflare Workers configuration for the KidMin Harmony API.
+#
+# Before deploying:
+#   1. `npx wrangler login`
+#   2. `npx wrangler d1 create kidmin-harmony-db`  -> copy the database_id below
+#   3. `npx wrangler r2 bucket create kidmin-harmony-media`
+#   4. `npx wrangler secret put JWT_SECRET`  -> set a long random string
+#   5. `npm run db:migrate:remote`
+#   6. `npm run deploy`
+
+name = "kidmin-harmony-api"
+main = "src/index.ts"
+compatibility_date = "2024-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Bind the D1 SQLite database.
+[[d1_databases]]
+binding = "DB"
+database_name = "kidmin-harmony-db"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+# Bind the R2 bucket for file / image uploads.
+[[r2_buckets]]
+binding = "MEDIA"
+bucket_name = "kidmin-harmony-media"
+
+[observability]
+enabled = true
+
+# Local development only: enables the /api/auth/seed endpoint to create the
+# demo accounts. Disable/remove this in production.
+[vars]
+SEED_DEMO = "true"
