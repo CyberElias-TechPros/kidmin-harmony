@@ -5,25 +5,31 @@ import {
   verifyPassword,
   signToken,
   requireRole,
+  ROLES as AUTH_ROLES,
   type AuthUser,
   type Role,
 } from "./auth";
-import { json, error, notFound, id, corsHeaders, todayISO, type Env } from "./helpers";
+import { json, error, notFound, id, corsHeaders, todayISO, auditLog, rateLimit, type Env } from "./helpers";
 
 const app = new Hono<{ Bindings: Env }>();
 
 // ---------------------------------------------------------------------------
-// CORS + preflight
+// CORS + preflight + security headers
 // ---------------------------------------------------------------------------
 app.use("*", async (c, next) => {
+  const reqOrigin = c.req.header("Origin");
   if (c.req.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: corsHeaders(c.env.ALLOWED_ORIGINS) });
+    return new Response(null, { status: 204, headers: corsHeaders(c.env.ALLOWED_ORIGINS, reqOrigin) });
   }
   await next();
-  const headers = corsHeaders(c.env.ALLOWED_ORIGINS);
+  const headers = corsHeaders(c.env.ALLOWED_ORIGINS, reqOrigin);
   const res = c.res;
   const newHeaders = new Headers(res.headers);
   Object.entries(headers).forEach(([k, v]) => newHeaders.set(k, v));
+  // Security headers
+  newHeaders.set("X-Content-Type-Options", "nosniff");
+  newHeaders.set("X-Frame-Options", "SAMEORIGIN");
+  newHeaders.set("Referrer-Policy", "strict-origin-when-cross-origin");
   c.res = new Response(res.body, { status: res.status, headers: newHeaders });
 });
 
@@ -49,13 +55,12 @@ function handleError(e: unknown): Response {
   if (msg === "UNAUTHORIZED") return error("Authentication required", 401);
   if (msg === "FORBIDDEN") return error("You do not have permission to perform this action", 403);
   if (msg === "EXISTS") return error("A record with this value already exists", 409);
+  if (msg === "RATE_LIMITED") return error("Too many requests. Please try again later.", 429);
   console.error(e);
   return error("Something went wrong", 500);
 }
 
-const ROLES = ["admin", "teacher", "parent", "volunteer", "cellLeader", "partner"];
-
-async function readBody<T = any>(c: any): Promise<T> {
+async function readBody<T = Record<string, unknown>>(c: any): Promise<T> {
   try {
     return (await c.req.json()) as T;
   } catch {
@@ -179,6 +184,13 @@ function mapPartner(r: any) {
   };
 }
 
+// Allowed upload MIME types
+const ALLOWED_UPLOAD_TYPES = new Set([
+  "image/jpeg", "image/png", "image/gif", "image/webp", "image/svg+xml",
+  "application/pdf",
+]);
+const MAX_UPLOAD_SIZE = 10 * 1024 * 1024; // 10 MB
+
 // ---------------------------------------------------------------------------
 // Health
 // ---------------------------------------------------------------------------
@@ -206,8 +218,6 @@ app.post("/api/auth/seed", async (c) => {
       }
     }
 
-    // Populate sample ministry data only if the children table is empty, so
-    // re-running the seed never duplicates content.
     const childCount = (await c.env.DB.prepare("SELECT COUNT(*) AS n FROM children").first<any>())?.n ?? 0;
     if (childCount === 0) {
       const admin = await c.env.DB.prepare("SELECT id FROM users WHERE role = 'admin' LIMIT 1").first<any>();
@@ -230,13 +240,11 @@ app.post("/api/auth/seed", async (c) => {
         ).bind(cid, ch.fn, ch.ln, ch.dob, "female", ch.age, "None", 1, ch.pf, ch.pl, ch.pe, ch.ph, admin?.id ?? null).run();
       }
 
-      // Create an attendance session for "today" and check in two children.
       const today = todayISO();
       const sessionId = id();
       await c.env.DB.prepare(
         "INSERT INTO attendance_sessions (id, date, service_type, created_by) VALUES (?, ?, ?, ?)"
       ).bind(sessionId, today, "Sunday Morning", admin?.id ?? null).run();
-      const todayKey = today.replace(/-/g, "");
       await c.env.DB.prepare(
         "INSERT INTO attendance_records (id, session_id, child_id, checked_in_at, checked_by, status) VALUES (?, ?, ?, ?, ?, 'present')"
       ).bind(id(), sessionId, childIds[0], `${today}T09:15:00.000Z`, "Teacher Smith").run();
@@ -247,7 +255,6 @@ app.post("/api/auth/seed", async (c) => {
         "INSERT INTO attendance_records (id, session_id, child_id, checked_in_at, checked_by, status) VALUES (?, ?, ?, ?, ?, 'present')"
       ).bind(id(), sessionId, childIds[2], `${today}T09:35:00.000Z`, "Admin User").run();
 
-      // Upcoming + past events.
       const events = [
         { title: "Bible Camp", description: "Annual bible camp for all age groups with fun activities and Bible lessons.", startDate: "2026-09-15", endDate: "2026-09-17", cap: 60, loc: "Church Main Hall", status: "upcoming" },
         { title: "Christmas Concert", description: "Annual children's Christmas concert and presentation.", startDate: "2026-12-18", endDate: "2026-12-18", cap: 120, loc: "Church Auditorium", status: "upcoming" },
@@ -263,13 +270,11 @@ app.post("/api/auth/seed", async (c) => {
            VALUES (?, ?, ?, ?, ?, '09:00', '14:00', ?, ?, 'all', 1, ?, ?)`
         ).bind(eid, e.title, e.description, e.startDate, e.endDate, e.loc, e.cap, e.status, admin?.id ?? null).run();
       }
-      // Register a couple children to the first upcoming event.
       await c.env.DB.prepare("INSERT INTO event_attendees (id, event_id, child_id, status) VALUES (?, ?, ?, 'confirmed')")
         .bind(id(), eventIds[0], childIds[0]).run();
       await c.env.DB.prepare("INSERT INTO event_attendees (id, event_id, child_id, status) VALUES (?, ?, ?, 'pending')")
         .bind(id(), eventIds[0], childIds[1]).run();
 
-      // Lessons.
       const lessons = [
         { title: "God Creates the World", desc: "Learning about the creation story from Genesis", age: "elementary", cat: "Bible Stories", date: "2026-08-02", dur: 45 },
         { title: "Noah's Ark", desc: "Learning about Noah and God's promise", age: "pre-school", cat: "Bible Stories", date: "2026-08-09", dur: 40 },
@@ -292,7 +297,6 @@ app.post("/api/auth/seed", async (c) => {
           .bind(id(), lid, "Discussion", "Group discussion about the lesson", 15, "Bibles").run();
       }
 
-      // Partners.
       const partners = [
         { name: "Grace Community Foundation", cp: "John Smith", email: "john@gracefoundation.org", type: "Financial", notes: "Annual sponsor for Bible Camp.", status: "active" },
         { name: "Kingdom Kids Publishing", cp: "Sarah Johnson", email: "sarah@kingdomkids.com", type: "Resource", notes: "Provides curriculum materials.", status: "active" },
@@ -305,7 +309,6 @@ app.post("/api/auth/seed", async (c) => {
         ).bind(id(), p.name, p.cp, p.email, "555-000-0000", p.type, p.notes, p.status).run();
       }
 
-      // Sample volunteers on the first upcoming event.
       await c.env.DB.prepare("INSERT INTO event_volunteers (id, event_id, name, role, assigned) VALUES (?, ?, ?, ?, ?)")
         .bind(id(), eventIds[0], "James Wilson", "Group Leader", "Group A").run();
     }
@@ -321,6 +324,10 @@ app.post("/api/auth/seed", async (c) => {
 // ---------------------------------------------------------------------------
 app.post("/api/auth/register", async (c) => {
   try {
+    // Rate limit: 5 registrations per IP per 15 minutes
+    const ip = c.req.header("CF-Connecting-IP") || c.req.header("X-Forwarded-For") || "unknown";
+    if (rateLimit(`register:${ip}`, 5, 900)) throw new Error("RATE_LIMITED");
+
     const body = await readBody(c);
     const name = str(body.name)?.trim();
     const email = str(body.email)?.trim().toLowerCase();
@@ -328,12 +335,12 @@ app.post("/api/auth/register", async (c) => {
     let role = (str(body.role) || "parent") as Role;
 
     if (!name || !email || !password) return error("Name, email and password are required");
+    if (name.length > 100) return error("Name must be 100 characters or less");
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return error("Invalid email address");
-    if (password.length < 6) return error("Password must be at least 6 characters");
-    if (!ROLES.includes(role)) role = "parent";
-    // Security: public self-registration is restricted to parents. Any staff
-    // role (teacher, volunteer, cellLeader, partner) holds access to children's
-    // sensitive data, so those accounts must be provisioned by an administrator.
+    if (password.length < 8) return error("Password must be at least 8 characters");
+    if (password.length > 128) return error("Password must be 128 characters or less");
+    if (!AUTH_ROLES.includes(role as any)) role = "parent";
+    // Security: public self-registration is restricted to parents.
     if (role === "admin") return error("Admin accounts cannot be created through registration", 403);
     if (role !== "parent")
       return error("Staff accounts must be created by an administrator. Please register as a parent or contact your ministry administrator.", 403);
@@ -351,6 +358,8 @@ app.post("/api/auth/register", async (c) => {
       .bind(userId, name, email, passwordHash, role, avatar)
       .run();
 
+    await auditLog(c.env.DB, userId, "register", "user", userId);
+
     const user: AuthUser = { id: userId, name, email, role, avatar };
     const token = await signToken(
       { sub: user.id, name: user.name, email: user.email, role: user.role, avatar: user.avatar },
@@ -364,6 +373,10 @@ app.post("/api/auth/register", async (c) => {
 
 app.post("/api/auth/login", async (c) => {
   try {
+    // Rate limit: 10 login attempts per IP per 15 minutes
+    const ip = c.req.header("CF-Connecting-IP") || c.req.header("X-Forwarded-For") || "unknown";
+    if (rateLimit(`login:${ip}`, 10, 900)) throw new Error("RATE_LIMITED");
+
     const body = await readBody(c);
     const email = str(body.email)?.trim().toLowerCase();
     const password = str(body.password);
@@ -374,6 +387,8 @@ app.post("/api/auth/login", async (c) => {
 
     const ok = await verifyPassword(password, row.password_hash);
     if (!ok) return error("Invalid email or password", 401);
+
+    await auditLog(c.env.DB, row.id, "login", "user", row.id);
 
     const user = mapUser(row);
     const token = await signToken(
@@ -402,6 +417,7 @@ app.put("/api/auth/me", async (c) => {
     const name = str(b.name)?.trim();
     const avatar = str(b.avatar);
     if (name) {
+      if (name.length > 100) return error("Name must be 100 characters or less");
       await c.env.DB.prepare("UPDATE users SET name = ?, avatar = COALESCE(?, avatar), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?")
         .bind(name, avatar, user.id)
         .run();
@@ -417,9 +433,251 @@ app.put("/api/auth/me", async (c) => {
   }
 });
 
+// Change password (authenticated)
+app.post("/api/auth/change-password", async (c) => {
+  try {
+    const user = await currentUser(c);
+    if (!user) return error("Authentication required", 401);
+    const b = await readBody(c);
+    const currentPassword = str(b.currentPassword);
+    const newPassword = str(b.newPassword);
+    if (!currentPassword || !newPassword) return error("Current password and new password are required");
+    if (newPassword.length < 8) return error("New password must be at least 8 characters");
+    if (newPassword.length > 128) return error("New password must be 128 characters or less");
+
+    const row = await c.env.DB.prepare("SELECT password_hash FROM users WHERE id = ?").bind(user.id).first<any>();
+    if (!row) return error("User not found", 404);
+
+    const valid = await verifyPassword(currentPassword, row.password_hash);
+    if (!valid) return error("Current password is incorrect", 401);
+
+    const newHash = await hashPassword(newPassword);
+    await c.env.DB.prepare("UPDATE users SET password_hash = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?")
+      .bind(newHash, user.id)
+      .run();
+
+    await auditLog(c.env.DB, user.id, "change_password", "user", user.id);
+    return json({ ok: true });
+  } catch (e) {
+    return handleError(e);
+  }
+});
+
+// Request password reset (generates a token — in production, this would send an email)
+app.post("/api/auth/forgot-password", async (c) => {
+  try {
+    const ip = c.req.header("CF-Connecting-IP") || c.req.header("X-Forwarded-For") || "unknown";
+    if (rateLimit(`forgot:${ip}`, 3, 900)) throw new Error("RATE_LIMITED");
+
+    const b = await readBody(c);
+    const email = str(b.email)?.trim().toLowerCase();
+    if (!email) return error("Email is required");
+
+    const row = await c.env.DB.prepare("SELECT id FROM users WHERE email = ?").bind(email).first<any>();
+    // Always return success to avoid email enumeration
+    if (!row) return json({ ok: true, message: "If that email exists, a reset link has been sent." });
+
+    // Generate a reset token
+    const rawToken = crypto.randomUUID();
+    // Hash the token before storing so a DB leak doesn't expose usable tokens
+    const tokenBytes = new TextEncoder().encode(rawToken);
+    const hashBuffer = await crypto.subtle.digest("SHA-256", tokenBytes);
+    const tokenHash = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, "0")).join("");
+
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // 1 hour
+
+    // Invalidate any existing tokens for this user
+    await c.env.DB.prepare("UPDATE password_reset_tokens SET used = 1 WHERE user_id = ?").bind(row.id).run();
+
+    await c.env.DB.prepare(
+      "INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)"
+    ).bind(id(), row.id, tokenHash, expiresAt).run();
+
+    await auditLog(c.env.DB, row.id, "forgot_password", "user", row.id);
+
+    // In production: send email with reset link containing the raw token.
+    // For now, return the token (only safe in dev/demo — production should use email).
+    return json({ ok: true, message: "If that email exists, a reset link has been sent.", resetToken: rawToken });
+  } catch (e) {
+    return handleError(e);
+  }
+});
+
+// Complete password reset with token
+app.post("/api/auth/reset-password", async (c) => {
+  try {
+    const b = await readBody(c);
+    const token = str(b.token);
+    const newPassword = str(b.newPassword);
+    if (!token || !newPassword) return error("Token and new password are required");
+    if (newPassword.length < 8) return error("Password must be at least 8 characters");
+    if (newPassword.length > 128) return error("Password must be 128 characters or less");
+
+    // Hash the token to look up
+    const tokenBytes = new TextEncoder().encode(token);
+    const hashBuffer = await crypto.subtle.digest("SHA-256", tokenBytes);
+    const tokenHash = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, "0")).join("");
+
+    const row = await c.env.DB.prepare(
+      "SELECT * FROM password_reset_tokens WHERE token_hash = ? AND used = 0 AND expires_at > datetime('now')"
+    ).bind(tokenHash).first<any>();
+
+    if (!row) return error("Invalid or expired reset token", 400);
+
+    const newHash = await hashPassword(newPassword);
+    await c.env.DB.prepare("UPDATE users SET password_hash = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?")
+      .bind(newHash, row.user_id).run();
+
+    // Mark token as used
+    await c.env.DB.prepare("UPDATE password_reset_tokens SET used = 1 WHERE id = ?").bind(row.id).run();
+
+    await auditLog(c.env.DB, row.user_id, "reset_password", "user", row.user_id);
+    return json({ ok: true });
+  } catch (e) {
+    return handleError(e);
+  }
+});
+
 app.post("/api/auth/logout", async (c) => {
-  // Stateless JWT: nothing to revoke server-side.
+  const user = await currentUser(c);
+  if (user) {
+    await auditLog(c.env.DB, user.id, "logout", "user", user.id);
+  }
   return json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Admin: User management
+// ---------------------------------------------------------------------------
+app.get("/api/admin/users", async (c) => {
+  try {
+    await requireRoles(c, ["admin"]);
+    const rows = await c.env.DB.prepare("SELECT id, name, email, role, avatar, created_at, updated_at FROM users ORDER BY created_at DESC").all<any>();
+    return json({
+      users: rows.results.map((r: any) => ({
+        id: r.id,
+        name: r.name,
+        email: r.email,
+        role: r.role,
+        avatar: r.avatar,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at,
+      })),
+    });
+  } catch (e) {
+    return handleError(e);
+  }
+});
+
+app.post("/api/admin/users", async (c) => {
+  try {
+    const admin = await requireRoles(c, ["admin"]);
+    const b = await readBody(c);
+    const name = str(b.name)?.trim();
+    const email = str(b.email)?.trim().toLowerCase();
+    const password = str(b.password);
+    const role = str(b.role) as Role | null;
+
+    if (!name || !email || !password) return error("Name, email and password are required");
+    if (name.length > 100) return error("Name must be 100 characters or less");
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return error("Invalid email address");
+    if (password.length < 8) return error("Password must be at least 8 characters");
+    if (!role || !AUTH_ROLES.includes(role as any)) return error("Invalid role. Must be one of: " + AUTH_ROLES.join(", "));
+
+    const existing = await c.env.DB.prepare("SELECT id FROM users WHERE email = ?").bind(email).first();
+    if (existing) throw new Error("EXISTS");
+
+    const userId = id();
+    const passwordHash = await hashPassword(password);
+    const avatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=6366f1&color=fff`;
+
+    await c.env.DB.prepare(
+      "INSERT INTO users (id, name, email, password_hash, role, avatar) VALUES (?, ?, ?, ?, ?, ?)"
+    ).bind(userId, name, email, passwordHash, role, avatar).run();
+
+    await auditLog(c.env.DB, admin.id, "create_user", "user", userId, JSON.stringify({ role }));
+
+    return json({
+      user: { id: userId, name, email, role, avatar, createdAt: new Date().toISOString() },
+    }, 201);
+  } catch (e) {
+    return handleError(e);
+  }
+});
+
+app.put("/api/admin/users/:id", async (c) => {
+  try {
+    const admin = await requireRoles(c, ["admin"]);
+    const userId = c.req.param("id");
+    const b = await readBody(c);
+
+    const existing = await c.env.DB.prepare("SELECT * FROM users WHERE id = ?").bind(userId).first<any>();
+    if (!existing) return notFound("User not found");
+
+    const name = str(b.name)?.trim() || existing.name;
+    const role = (str(b.role) as Role) || existing.role;
+    if (!AUTH_ROLES.includes(role as any)) return error("Invalid role");
+
+    await c.env.DB.prepare(
+      "UPDATE users SET name = ?, role = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?"
+    ).bind(name, role, userId).run();
+
+    await auditLog(c.env.DB, admin.id, "update_user", "user", userId, JSON.stringify({ role }));
+
+    const row = await c.env.DB.prepare("SELECT id, name, email, role, avatar, created_at, updated_at FROM users WHERE id = ?").bind(userId).first<any>();
+    return json({
+      user: { id: row.id, name: row.name, email: row.email, role: row.role, avatar: row.avatar, createdAt: row.created_at, updatedAt: row.updated_at },
+    });
+  } catch (e) {
+    return handleError(e);
+  }
+});
+
+app.delete("/api/admin/users/:id", async (c) => {
+  try {
+    const admin = await requireRoles(c, ["admin"]);
+    const userId = c.req.param("id");
+    if (userId === admin.id) return error("You cannot delete your own account", 400);
+
+    const existing = await c.env.DB.prepare("SELECT id, role FROM users WHERE id = ?").bind(userId).first<any>();
+    if (!existing) return notFound("User not found");
+
+    await c.env.DB.prepare("DELETE FROM users WHERE id = ?").bind(userId).run();
+    await auditLog(c.env.DB, admin.id, "delete_user", "user", userId, JSON.stringify({ role: existing.role }));
+
+    return json({ ok: true });
+  } catch (e) {
+    return handleError(e);
+  }
+});
+
+// Admin: Audit logs
+app.get("/api/admin/audit-logs", async (c) => {
+  try {
+    await requireRoles(c, ["admin"]);
+    const limit = Math.min(int(c.req.query("limit"), 100), 500);
+    const offset = int(c.req.query("offset"), 0);
+    const rows = await c.env.DB.prepare(
+      `SELECT al.*, u.name as user_name, u.email as user_email
+       FROM audit_logs al LEFT JOIN users u ON u.id = al.user_id
+       ORDER BY al.created_at DESC LIMIT ? OFFSET ?`
+    ).bind(limit, offset).all<any>();
+    return json({
+      logs: rows.results.map((r: any) => ({
+        id: r.id,
+        userId: r.user_id,
+        userName: r.user_name,
+        userEmail: r.user_email,
+        action: r.action,
+        resource: r.resource,
+        resourceId: r.resource_id,
+        metadata: r.metadata ? JSON.parse(r.metadata) : null,
+        createdAt: r.created_at,
+      })),
+    });
+  } catch (e) {
+    return handleError(e);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -484,6 +742,7 @@ app.post("/api/children", async (c) => {
     const firstName = str(b.firstName)?.trim();
     const lastName = str(b.lastName)?.trim();
     if (!firstName || !lastName) return error("First name and last name are required");
+    if (firstName.length > 100 || lastName.length > 100) return error("Names must be 100 characters or less");
 
     const childId = id();
     await c.env.DB.prepare(
@@ -521,6 +780,8 @@ app.post("/api/children", async (c) => {
       )
       .run();
 
+    await auditLog(c.env.DB, user.id, "create_child", "child", childId);
+
     const row = await c.env.DB.prepare("SELECT * FROM children WHERE id = ?").bind(childId).first<any>();
     return json({ child: mapChild(row) }, 201);
   } catch (e) {
@@ -533,6 +794,10 @@ app.put("/api/children/:id", async (c) => {
     const user = await requireRoles(c, ["admin", "teacher"]);
     const childId = c.req.param("id");
     const b = await readBody(c);
+    const firstName = str(b.firstName)?.trim();
+    const lastName = str(b.lastName)?.trim();
+    if (!firstName || !lastName) return error("First name and last name are required");
+
     await c.env.DB.prepare(
       `UPDATE children SET
         first_name = ?, last_name = ?, dob = ?, gender = ?, age_group = ?, allergies = ?, medical_notes = ?,
@@ -543,8 +808,8 @@ app.put("/api/children/:id", async (c) => {
       WHERE id = ?`
     )
       .bind(
-        str(b.firstName),
-        str(b.lastName),
+        firstName,
+        lastName,
         str(b.dob),
         str(b.gender),
         str(b.ageGroup),
@@ -567,6 +832,8 @@ app.put("/api/children/:id", async (c) => {
       )
       .run();
 
+    await auditLog(c.env.DB, user.id, "update_child", "child", childId);
+
     const row = await c.env.DB.prepare("SELECT * FROM children WHERE id = ?").bind(childId).first<any>();
     if (!row) return notFound("Child not found");
     return json({ child: mapChild(row) });
@@ -577,11 +844,12 @@ app.put("/api/children/:id", async (c) => {
 
 app.delete("/api/children/:id", async (c) => {
   try {
-    await requireRoles(c, ["admin"]);
+    const admin = await requireRoles(c, ["admin"]);
     const childId = c.req.param("id");
     const row = await c.env.DB.prepare("SELECT id FROM children WHERE id = ?").bind(childId).first();
     if (!row) return notFound("Child not found");
     await c.env.DB.prepare("DELETE FROM children WHERE id = ?").bind(childId).run();
+    await auditLog(c.env.DB, admin.id, "delete_child", "child", childId);
     return json({ ok: true });
   } catch (e) {
     return handleError(e);
@@ -595,6 +863,7 @@ app.post("/api/children/:id/notes", async (c) => {
     const b = await readBody(c);
     const text = str(b.text)?.trim();
     if (!text) return error("Note text is required");
+    if (text.length > 5000) return error("Note must be 5000 characters or less");
     const noteId = id();
     await c.env.DB.prepare(
       "INSERT INTO child_notes (id, child_id, author, text) VALUES (?, ?, ?, ?)"
@@ -623,7 +892,7 @@ app.delete("/api/children/:id/notes/:noteId", async (c) => {
 // ---------------------------------------------------------------------------
 app.get("/api/attendance", async (c) => {
   try {
-    const user = await requireRoles(c, ["admin", "teacher", "volunteer", "cellLeader", "partner"]);
+    await requireRoles(c, ["admin", "teacher", "volunteer", "cellLeader", "partner"]);
     const sessions = await c.env.DB.prepare(
       "SELECT s.*, COUNT(ar.id) AS present_count FROM attendance_sessions s LEFT JOIN attendance_records ar ON ar.session_id = s.id GROUP BY s.id ORDER BY s.date DESC"
     ).all<any>();
@@ -739,29 +1008,31 @@ app.get("/api/attendance/:id", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// Events
+// Events — fixed N+1 query by using a single JOIN with GROUP BY
 // ---------------------------------------------------------------------------
 app.get("/api/events", async (c) => {
   try {
     await requireRoles(c, ["admin", "teacher", "parent", "volunteer", "cellLeader", "partner"]);
-    const rows = await c.env.DB.prepare("SELECT * FROM events ORDER BY start_date").all<any>();
+    // Single query with JOIN to get attendee counts — no N+1.
+    const rows = await c.env.DB.prepare(
+      `SELECT e.*, COUNT(ea.id) AS registered_attendees
+       FROM events e
+       LEFT JOIN event_attendees ea ON ea.event_id = e.id
+       GROUP BY e.id
+       ORDER BY e.start_date`
+    ).all<any>();
+
     const today = todayISO();
-    const all = rows.results.map((r) => {
+    const all = rows.results.map((r: any) => {
       const e = mapEvent(r);
       const status = e.startDate < today ? "past" : "upcoming";
-      const attendees = c.env.DB.prepare("SELECT COUNT(*) AS n FROM event_attendees WHERE event_id = ?").bind(r.id).first<any>();
-      return { ...e, status, registeredAttendees: 0 };
+      return { ...e, status, registeredAttendees: r.registered_attendees ?? 0 };
     });
-    const withCounts = await Promise.all(
-      all.map(async (e) => {
-        const count = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM event_attendees WHERE event_id = ?").bind(e.id).first<any>();
-        return { ...e, registeredAttendees: count?.n ?? 0 };
-      })
-    );
+
     return json({
-      events: withCounts,
-      upcoming: withCounts.filter((e) => e.status === "upcoming"),
-      past: withCounts
+      events: all,
+      upcoming: all.filter((e) => e.status === "upcoming"),
+      past: all
         .filter((e) => e.status === "past")
         .sort((a, b) => (a.startDate < b.startDate ? 1 : -1)),
     });
@@ -812,6 +1083,7 @@ app.post("/api/events", async (c) => {
     const b = await readBody(c);
     const title = str(b.title)?.trim();
     if (!title) return error("Event title is required");
+    if (title.length > 200) return error("Title must be 200 characters or less");
     const eventId = id();
     const startDate = str(b.startDate) || todayISO();
     const endDate = str(b.endDate) || startDate;
@@ -849,11 +1121,13 @@ app.put("/api/events/:id", async (c) => {
     await requireRoles(c, ["admin", "teacher"]);
     const eventId = c.req.param("id");
     const b = await readBody(c);
+    const title = str(b.title)?.trim();
+    if (!title) return error("Event title is required");
     await c.env.DB.prepare(
       `UPDATE events SET title=?, description=?, start_date=?, end_date=?, start_time=?, end_time=?, location=?, address=?, capacity=?, age_group=?, requires_registration=?, image_url=?, status=?, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?`
     )
       .bind(
-        str(b.title),
+        title,
         str(b.description),
         str(b.startDate),
         str(b.endDate),
@@ -1000,6 +1274,7 @@ app.post("/api/lessons", async (c) => {
     const b = await readBody(c);
     const title = str(b.title)?.trim();
     if (!title) return error("Lesson title is required");
+    if (title.length > 200) return error("Title must be 200 characters or less");
     const lessonId = id();
     await c.env.DB.prepare(
       `INSERT INTO lessons (id, title, description, age_group, category, lesson_date, duration, created_by)
@@ -1039,10 +1314,12 @@ app.put("/api/lessons/:id", async (c) => {
     await requireRoles(c, ["admin", "teacher"]);
     const lessonId = c.req.param("id");
     const b = await readBody(c);
+    const title = str(b.title)?.trim();
+    if (!title) return error("Lesson title is required");
     await c.env.DB.prepare(
       `UPDATE lessons SET title=?, description=?, age_group=?, category=?, lesson_date=?, duration=?, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?`
     )
-      .bind(str(b.title), str(b.description), str(b.ageGroup), str(b.category), str(b.date), int(b.duration), lessonId)
+      .bind(title, str(b.description), str(b.ageGroup), str(b.category), str(b.date), int(b.duration), lessonId)
       .run();
 
     // Replace relations
@@ -1108,6 +1385,7 @@ app.post("/api/partners", async (c) => {
     const b = await readBody(c);
     const name = str(b.name)?.trim();
     if (!name) return error("Partner name is required");
+    if (name.length > 200) return error("Name must be 200 characters or less");
     const partnerId = id();
     await c.env.DB.prepare(
       `INSERT INTO partners (id, name, contact_person, email, phone, partnership_type, contribution_amount, last_contribution, next_meeting, notes, status)
@@ -1139,11 +1417,13 @@ app.put("/api/partners/:id", async (c) => {
     await requireRoles(c, ["admin"]);
     const partnerId = c.req.param("id");
     const b = await readBody(c);
+    const name = str(b.name)?.trim();
+    if (!name) return error("Partner name is required");
     await c.env.DB.prepare(
       `UPDATE partners SET name=?, contact_person=?, email=?, phone=?, partnership_type=?, contribution_amount=?, last_contribution=?, next_meeting=?, notes=?, status=?, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?`
     )
       .bind(
-        str(b.name),
+        name,
         str(b.contactPerson),
         str(b.email),
         str(b.phone),
@@ -1182,7 +1462,7 @@ app.delete("/api/partners/:id", async (c) => {
 // ---------------------------------------------------------------------------
 app.get("/api/reports/summary", async (c) => {
   try {
-    const user = await requireRoles(c, ["admin", "teacher"]);
+    await requireRoles(c, ["admin", "teacher"]);
     const totalChildren = (await c.env.DB.prepare("SELECT COUNT(*) AS n FROM children").first<any>())?.n ?? 0;
     const totalTeachers = (await c.env.DB.prepare("SELECT COUNT(*) AS n FROM users WHERE role IN ('teacher','admin')").first<any>())?.n ?? 0;
     const totalLessons = (await c.env.DB.prepare("SELECT COUNT(*) AS n FROM lessons").first<any>())?.n ?? 0;
@@ -1220,8 +1500,6 @@ app.get("/api/reports/summary", async (c) => {
 // ---------------------------------------------------------------------------
 // Reports / analytics
 // ---------------------------------------------------------------------------
-// Build the last `n` months as { key: 'YYYY-MM', label: 'Jan' } ending at the
-// current month.
 function lastMonths(n: number): { key: string; label: string; full: string }[] {
   const out: { key: string; label: string; full: string }[] = [];
   const now = new Date();
@@ -1241,7 +1519,6 @@ app.get("/api/reports/analytics", async (c) => {
   try {
     await requireRoles(c, ["admin", "teacher"]);
 
-    // --- Attendance trend (per month) ---
     const monthKeys = lastMonths(12);
     const attendanceByMonth = await c.env.DB.prepare(
       "SELECT substr(s.date, 1, 7) AS ym, COUNT(DISTINCT ar.child_id) AS present FROM attendance_records ar JOIN attendance_sessions s ON s.id = ar.session_id GROUP BY ym"
@@ -1249,7 +1526,6 @@ app.get("/api/reports/analytics", async (c) => {
     const attMap: Record<string, number> = {};
     for (const r of attendanceByMonth.results) attMap[r.ym] = r.present;
 
-    // --- Cumulative registered children per month ---
     const childrenByMonth = await c.env.DB.prepare(
       "SELECT substr(created_at, 1, 7) AS ym, COUNT(*) AS n FROM children GROUP BY ym ORDER BY ym"
     ).all<any>();
@@ -1259,7 +1535,6 @@ app.get("/api/reports/analytics", async (c) => {
       running += r.n;
       cumMap[r.ym] = running;
     }
-    // Total children today is the final running total.
     const totalChildren = running;
 
     const attendanceTrend = monthKeys.map((m) => {
@@ -1275,7 +1550,6 @@ app.get("/api/reports/analytics", async (c) => {
       };
     });
 
-    // --- Age distribution ---
     const ageGroups = await c.env.DB.prepare(
       "SELECT COALESCE(NULLIF(age_group, ''), 'Unassigned') AS name, COUNT(*) AS value FROM children GROUP BY name ORDER BY value DESC"
     ).all<any>();
@@ -1286,14 +1560,12 @@ app.get("/api/reports/analytics", async (c) => {
       color: agePalette[i % agePalette.length],
     }));
 
-    // --- Curriculum progress (per category) ---
     const lessonCats = await c.env.DB.prepare(
       `SELECT COALESCE(NULLIF(category, ''), 'Uncategorized') AS name, COUNT(*) AS total,
               SUM(CASE WHEN lesson_date IS NOT NULL AND lesson_date < date('now') THEN 1 ELSE 0 END) AS complete
        FROM lessons GROUP BY name ORDER BY total DESC`
     ).all<any>();
 
-    // --- Check-in time distribution (bucketed by hour) ---
     const checkinHours = await c.env.DB.prepare(
       "SELECT substr(checked_in_at, 12, 2) AS hour, COUNT(*) AS count FROM attendance_records GROUP BY hour"
     ).all<any>();
@@ -1310,7 +1582,6 @@ app.get("/api/reports/analytics", async (c) => {
       checkInTimes.push({ time: "No check-ins yet", hour: "00", count: 0 });
     }
 
-    // --- Teacher & volunteer participation (per month) ---
     const teachersByMonth = await c.env.DB.prepare(
       "SELECT substr(created_at, 1, 7) AS ym, COUNT(*) AS n FROM users WHERE role IN ('teacher','admin') GROUP BY ym"
     ).all<any>();
@@ -1349,7 +1620,7 @@ app.get("/api/reports/analytics", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// File upload (R2)
+// File upload (R2) — with validation
 // ---------------------------------------------------------------------------
 app.post("/api/upload", async (c) => {
   try {
@@ -1357,7 +1628,19 @@ app.post("/api/upload", async (c) => {
     const form = await c.req.formData();
     const file = form.get("file") as File | null;
     if (!file) return error("No file uploaded");
-    const key = `uploads/${Date.now()}-${id()}`;
+
+    // Validate MIME type
+    if (!ALLOWED_UPLOAD_TYPES.has(file.type)) {
+      return error(`File type "${file.type || "unknown"}" is not allowed. Accepted: images (JPEG, PNG, GIF, WebP, SVG) and PDF.`);
+    }
+
+    // Validate size
+    if (file.size > MAX_UPLOAD_SIZE) {
+      return error(`File is too large. Maximum size is ${Math.round(MAX_UPLOAD_SIZE / 1024 / 1024)} MB.`);
+    }
+
+    const ext = file.name.split(".").pop()?.toLowerCase() || "";
+    const key = `uploads/${Date.now()}-${id()}.${ext}`;
     await c.env.MEDIA.put(key, file.stream(), {
       httpMetadata: { contentType: file.type },
     });
@@ -1372,7 +1655,11 @@ app.get("/media/:key*", async (c) => {
   const obj = await c.env.MEDIA.get(key);
   if (!obj) return notFound("Object not found");
   return new Response(obj.body as ReadableStream, {
-    headers: { "Content-Type": obj.httpMetadata?.contentType || "application/octet-stream", "Cache-Control": "public, max-age=31536000" },
+    headers: {
+      "Content-Type": obj.httpMetadata?.contentType || "application/octet-stream",
+      "Cache-Control": "public, max-age=31536000",
+      "X-Content-Type-Options": "nosniff",
+    },
   });
 });
 

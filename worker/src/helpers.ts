@@ -23,23 +23,74 @@ export function id(): string {
   return crypto.randomUUID();
 }
 
-// Convert a single D1 row to a friendly camelCase object.
-export function rowToJson(row: Record<string, unknown>): Record<string, unknown> {
-  return row;
-}
-
-// -------- auth header extraction --------
-
-export function corsHeaders(allowedOrigins?: string): Record<string, string> {
-  const origin = allowedOrigins || "*";
+/**
+ * Build CORS response headers. When ALLOWED_ORIGINS is empty or unset, the
+ * Worker is assumed to be behind Vercel rewrites (same-origin) so we echo
+ * back the request Origin header for flexibility while still being explicit.
+ * When a comma-separated allow-list is configured we honour it.
+ */
+export function corsHeaders(allowedOrigins: string | undefined, requestOrigin?: string | null): Record<string, string> {
+  let origin = "*";
+  if (allowedOrigins && allowedOrigins.trim()) {
+    const list = allowedOrigins.split(",").map((s) => s.trim());
+    if (requestOrigin && list.includes(requestOrigin)) {
+      origin = requestOrigin;
+    } else if (list.length > 0) {
+      origin = list[0];
+    }
+  } else if (requestOrigin) {
+    // No explicit allow-list — behind a proxy, echo the request origin.
+    origin = requestOrigin;
+  }
   return {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
     "Access-Control-Max-Age": "86400",
+    "Vary": "Origin",
   };
 }
 
 export function todayISO(): string {
   return new Date().toISOString().slice(0, 10);
+}
+
+// -------- Audit logging --------
+
+export async function auditLog(
+  db: D1Database,
+  userId: string | null,
+  action: string,
+  resource: string,
+  resourceId: string | null,
+  metadata?: string,
+): Promise<void> {
+  try {
+    await db.prepare(
+      "INSERT INTO audit_logs (id, user_id, action, resource, resource_id, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))"
+    ).bind(id(), userId, action, resource, resourceId, metadata ?? null).run();
+  } catch {
+    // Non-fatal: don't break the main request if audit logging fails.
+    console.error("audit log insert failed");
+  }
+}
+
+// -------- Simple in-memory rate limiter (per-Worker isolate) --------
+
+const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+
+/**
+ * Returns true if the request should be blocked.
+ * windowSec: time window in seconds
+ * maxRequests: maximum requests allowed in the window
+ */
+export function rateLimit(key: string, maxRequests: number, windowSec: number): boolean {
+  const now = Date.now();
+  const entry = rateLimitMap.get(key);
+  if (!entry || now >= entry.resetAt) {
+    rateLimitMap.set(key, { count: 1, resetAt: now + windowSec * 1000 });
+    return false;
+  }
+  entry.count++;
+  return entry.count > maxRequests;
 }

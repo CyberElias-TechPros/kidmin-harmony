@@ -30,6 +30,7 @@ import Partners from "./pages/partners/Partners";
 import Reports from "./pages/reports/Reports";
 import Profile from "./pages/Profile";
 import Settings from "./pages/Settings";
+import AdminUsers from "./pages/admin/Users";
 
 interface ProtectedRouteProps {
   children: React.ReactNode;
@@ -252,6 +253,16 @@ const App = () => (
               element={
                 <ProtectedRoute>
                   <Settings />
+                </ProtectedRoute>
+              }
+            />
+
+            {/* Admin: User Management */}
+            <Route
+              path="/admin/users"
+              element={
+                <ProtectedRoute allowedRoles={["admin"]}>
+                  <AdminUsers />
                 </ProtectedRoute>
               }
             />

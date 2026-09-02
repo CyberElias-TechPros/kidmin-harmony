@@ -4,7 +4,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { 
   Users, Home, CalendarCheck, BookOpen, Calendar, HeartHandshake, 
-  BarChart3, LogOut, Menu, X, ChevronDown, User
+  BarChart3, LogOut, Menu, X, ChevronDown, User, Shield
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -33,6 +33,7 @@ const navItems: NavItem[] = [
   { title: 'Events', href: '/events', icon: <Calendar className="h-5 w-5" /> },
   { title: 'Partners', href: '/partners', icon: <HeartHandshake className="h-5 w-5" />, roles: ['admin'] },
   { title: 'Reports', href: '/reports', icon: <BarChart3 className="h-5 w-5" />, roles: ['admin', 'teacher'] },
+  { title: 'Users', href: '/admin/users', icon: <Shield className="h-5 w-5" />, roles: ['admin'] },
 ];
 
 interface LayoutProps {
@@ -84,7 +85,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             </Button>
             <div 
               className="flex items-center gap-2 cursor-pointer" 
-              onClick={() => navigate('/')}
+              onClick={() => navigate('/dashboard')}
             >
               <div className="h-8 w-8 rounded-full bg-primary flex items-center justify-center">
                 <Users className="h-4 w-4 text-white" />

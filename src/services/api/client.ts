@@ -88,8 +88,48 @@ export const authApi = {
     api.post<AuthResponse>("/auth/register", payload),
   me: () => api.get<{ user: User }>("/auth/me"),
   updateProfile: (payload: { name: string; avatar?: string }) => api.put<{ user: User }>("/auth/me", payload),
+  changePassword: (currentPassword: string, newPassword: string) =>
+    api.post<{ ok: boolean }>("/auth/change-password", { currentPassword, newPassword }),
+  forgotPassword: (email: string) =>
+    api.post<{ ok: boolean; message: string; resetToken?: string }>("/auth/forgot-password", { email }),
+  resetPassword: (token: string, newPassword: string) =>
+    api.post<{ ok: boolean }>("/auth/reset-password", { token, newPassword }),
   logout: () => api.post<{ ok: boolean }>("/auth/logout"),
   seed: () => api.post<{ ok: boolean; seeded: boolean }>("/auth/seed"),
+};
+
+// ---- Admin ----
+export interface AdminUser {
+  id: string;
+  name: string;
+  email: string;
+  role: string;
+  avatar?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface AuditLogEntry {
+  id: string;
+  userId: string | null;
+  userName: string | null;
+  userEmail: string | null;
+  action: string;
+  resource: string;
+  resourceId: string | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+export const adminApi = {
+  listUsers: () => api.get<{ users: AdminUser[] }>("/admin/users"),
+  createUser: (data: { name: string; email: string; password: string; role: string }) =>
+    api.post<{ user: AdminUser }>("/admin/users", data),
+  updateUser: (id: string, data: { name?: string; role?: string }) =>
+    api.put<{ user: AdminUser }>(`/admin/users/${id}`, data),
+  deleteUser: (id: string) => api.del<{ ok: boolean }>(`/admin/users/${id}`),
+  auditLogs: (limit = 100, offset = 0) =>
+    api.get<{ logs: AuditLogEntry[] }>(`/admin/audit-logs?limit=${limit}&offset=${offset}`),
 };
 
 // ---- Children ----

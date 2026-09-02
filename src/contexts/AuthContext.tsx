@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from "react";
+import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
 import { toast } from "sonner";
 import { authApi, setToken, getToken, ApiError } from "@/services/api/client";
 import type { User, Role } from "@/services/api/types";
@@ -8,6 +8,7 @@ interface AuthContextType {
   login: (email: string, password: string) => Promise<void>;
   register: (name: string, email: string, password: string, role: Role) => Promise<void>;
   logout: () => Promise<void>;
+  refreshUser: () => Promise<void>;
   isLoading: boolean;
   isAuthenticated: boolean;
 }
@@ -17,6 +18,7 @@ const AuthContext = createContext<AuthContextType>({
   login: async () => {},
   register: async () => {},
   logout: async () => {},
+  refreshUser: async () => {},
   isLoading: true,
   isAuthenticated: false,
 });
@@ -77,6 +79,17 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     };
   }, []);
 
+  // Listen for storage changes from other tabs or profile updates.
+  useEffect(() => {
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === USER_SESSION_KEY) {
+        setUser(loadCachedUser());
+      }
+    };
+    window.addEventListener("storage", handleStorage);
+    return () => window.removeEventListener("storage", handleStorage);
+  }, []);
+
   const login = async (email: string, password: string) => {
     setIsLoading(true);
     try {
@@ -123,9 +136,19 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     toast.info("You have been logged out");
   };
 
+  const refreshUser = useCallback(async () => {
+    try {
+      const res = await authApi.me();
+      setUser(res.user);
+      localStorage.setItem(USER_SESSION_KEY, JSON.stringify(res.user));
+    } catch {
+      // Silently fail; cached user remains.
+    }
+  }, []);
+
   return (
     <AuthContext.Provider
-      value={{ user, login, register, logout, isLoading, isAuthenticated: !!user }}
+      value={{ user, login, register, logout, refreshUser, isLoading, isAuthenticated: !!user }}
     >
       {children}
     </AuthContext.Provider>

@@ -29,6 +29,7 @@ bucket_name = "kidmin-harmony-media"
 enabled = true
 
 # Local development only: enables the /api/auth/seed endpoint to create the
-# demo accounts. Disable/remove this in production.
+# demo accounts. In production, override this to "false" via wrangler secret
+# or remove it entirely.
 [vars]
-SEED_DEMO = "true"
+SEED_DEMO = "false"

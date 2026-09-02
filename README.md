@@ -2,7 +2,7 @@
 
 A children's ministry management app: register and manage children, track
 attendance (QR + manual check-in), plan events, build a curriculum, administer
-ministry partners and view reports.
+ministry partners, manage users, view reports, and audit sensitive actions.
 
 **Stack**
 
@@ -59,8 +59,8 @@ Or use the one-click demo buttons on the login page.
 ### Backend → Cloudflare
 
 Follow `worker/README.md`: create the D1 database and R2 bucket, set
-`JWT_SECRET`, run the migrations, then `npm run deploy`. Disable `SEED_DEMO` in
-production.
+`JWT_SECRET`, run the migrations, then `npm run deploy`. Seeding is disabled
+by default in production (`SEED_DEMO = "false"`).
 
 ### Frontend → Vercel
 
@@ -79,7 +79,8 @@ See `.env.example`.
 
 ## Roles & access
 
-- **admin** — full access (children, attendance, events, lessons, partners, reports).
+- **admin** — full access (children, attendance, events, lessons, partners,
+  reports, user management, audit logs).
 - **teacher** — children, attendance, events, lessons, reports.
 - **volunteer / cellLeader** — children, attendance (check-in).
 - **parent** — sees only their registered children, can view curriculum and
@@ -89,3 +90,17 @@ See `.env.example`.
 > and admin accounts (teacher, volunteer, cell leader, partner) hold access to
 > children's sensitive data and must be provisioned by an administrator — they
 > cannot be created through the sign-up form or the `/api/auth/register` endpoint.
+
+## Security Features
+
+- PBKDF2 password hashing (100k iterations, SHA-256)
+- JWT (HS256) authentication with configurable expiration
+- Rate limiting on login, registration, and password reset endpoints
+- Server-side authorization checks on every protected endpoint
+- File upload validation (MIME type + size limits)
+- CORS configuration with explicit origin allow-listing
+- Security headers (X-Content-Type-Options, X-Frame-Options, Referrer-Policy)
+- Audit logging of sensitive operations
+- Password reset flow with SHA-256-hashed single-use tokens
+- No external CDN scripts or third-party tracking
+- TypeScript strict mode enabled
