@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input';
 import { useAuth } from '@/contexts/AuthContext';
 import { Users, Info } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { usePageMeta } from '@/hooks/usePageMeta';
 
 interface RegisterFormData {
   name: string;
@@ -16,6 +17,11 @@ interface RegisterFormData {
 }
 
 const Register = () => {
+  usePageMeta({
+    title: 'Create account — KidMin Harmony',
+    description: 'Create a KidMin Harmony account for your family.',
+    noindex: true,
+  });
   const navigate = useNavigate();
   const { register: registerUser } = useAuth();
   const {

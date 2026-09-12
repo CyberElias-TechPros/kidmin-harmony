@@ -8,6 +8,7 @@ import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
 import { Users } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { usePageMeta } from '@/hooks/usePageMeta';
 
 interface LoginFormData {
   email: string;
@@ -15,6 +16,11 @@ interface LoginFormData {
 }
 
 const Login = () => {
+  usePageMeta({
+    title: 'Sign in — KidMin Harmony',
+    description: 'Sign in to your KidMin Harmony account.',
+    noindex: true,
+  });
   const { login } = useAuth();
   const navigate = useNavigate();
   const {
@@ -100,6 +106,7 @@ const Login = () => {
             </div>
           </form>
 
+          {import.meta.env.DEV && (
           <div className="mt-6">
             <div className="relative my-4">
               <div className="absolute inset-0 flex items-center">
@@ -147,6 +154,7 @@ const Login = () => {
               </Button>
             </div>
           </div>
+          )}
         </div>
 
         <p className="mt-4 text-center text-sm text-muted-foreground animate-slide-up [animation-delay:600ms]">

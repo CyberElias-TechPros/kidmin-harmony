@@ -1,18 +1,24 @@
-import React, { useState } from "react";
+import React from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
-import { LogOut, Bell, Palette, Shield } from "lucide-react";
+import { LogOut, Moon, Palette, Shield, Sun, Monitor } from "lucide-react";
 import { useNavigate } from "react-router-dom";
+import { useTheme } from "next-themes";
 import { useAuth } from "@/contexts/AuthContext";
+import { usePageMeta } from "@/hooks/usePageMeta";
+
+const themeOptions = [
+  { value: "light", label: "Light", icon: <Sun className="h-4 w-4" /> },
+  { value: "dark", label: "Dark", icon: <Moon className="h-4 w-4" /> },
+  { value: "system", label: "System", icon: <Monitor className="h-4 w-4" /> },
+] as const;
 
 const Settings = () => {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
-  const [emailNotif, setEmailNotif] = useState(true);
-  const [pushNotif, setPushNotif] = useState(false);
-  const [compact, setCompact] = useState(false);
+  const { theme, setTheme, resolvedTheme } = useTheme();
+  usePageMeta({ title: "Settings — KidMin Harmony" });
 
   return (
     <div className="space-y-6 max-w-3xl">
@@ -23,45 +29,43 @@ const Settings = () => {
 
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center"><Bell className="mr-2 h-5 w-5" /> Notifications</CardTitle>
-          <CardDescription>Choose how you'd like to be notified</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex items-center justify-between">
-            <div>
-              <Label htmlFor="email">Email notifications</Label>
-              <p className="text-sm text-muted-foreground">Receive updates via email</p>
-            </div>
-            <Switch id="email" checked={emailNotif} onCheckedChange={setEmailNotif} />
-          </div>
-          <div className="flex items-center justify-between">
-            <div>
-              <Label htmlFor="push">Push notifications</Label>
-              <p className="text-sm text-muted-foreground">Get real-time alerts on your device</p>
-            </div>
-            <Switch id="push" checked={pushNotif} onCheckedChange={setPushNotif} />
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center"><Palette className="mr-2 h-5 w-5" /> Appearance</CardTitle>
+          <CardTitle className="flex items-center">
+            <Palette className="mr-2 h-5 w-5" /> Appearance
+          </CardTitle>
+          <CardDescription>
+            Choose how KidMin Harmony looks on this device.
+            {resolvedTheme ? ` Currently using the ${resolvedTheme} theme.` : ""}
+          </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="flex items-center justify-between">
-            <div>
-              <Label htmlFor="compact">Compact view</Label>
-              <p className="text-sm text-muted-foreground">Reduce spacing to fit more content</p>
-            </div>
-            <Switch id="compact" checked={compact} onCheckedChange={setCompact} />
+          <div className="flex gap-3" role="radiogroup" aria-label="Theme">
+            {themeOptions.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                role="radio"
+                aria-checked={theme === option.value}
+                onClick={() => setTheme(option.value)}
+                className={`flex flex-1 flex-col items-center gap-2 rounded-lg border p-4 transition-colors ${
+                  theme === option.value
+                    ? "border-primary bg-primary/10 text-foreground"
+                    : "border-border bg-background text-muted-foreground hover:bg-secondary"
+                }`}
+              >
+                {option.icon}
+                <span className="text-sm font-medium">{option.label}</span>
+              </button>
+            ))}
           </div>
         </CardContent>
       </Card>
 
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center"><Shield className="mr-2 h-5 w-5" /> Account</CardTitle>
+          <CardTitle className="flex items-center">
+            <Shield className="mr-2 h-5 w-5" /> Account
+          </CardTitle>
+          <CardDescription>Manage your profile and session</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="flex items-center justify-between">
@@ -71,8 +75,12 @@ const Settings = () => {
             </div>
           </div>
           <div className="flex gap-2">
-            <Button variant="outline" onClick={() => navigate("/profile")}>Edit Profile</Button>
-            <Button variant="destructive" onClick={logout}><LogOut className="mr-2 h-4 w-4" /> Log out</Button>
+            <Button variant="outline" onClick={() => navigate("/profile")}>
+              Edit Profile
+            </Button>
+            <Button variant="destructive" onClick={logout}>
+              <LogOut className="mr-2 h-4 w-4" /> Log out
+            </Button>
           </div>
         </CardContent>
       </Card>
