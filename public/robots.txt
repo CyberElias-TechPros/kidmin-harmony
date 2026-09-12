@@ -1,0 +1,5 @@
+User-agent: *
+Allow: /
+
+# Only the landing page is indexable; the app itself requires login and
+# is marked noindex client-side.

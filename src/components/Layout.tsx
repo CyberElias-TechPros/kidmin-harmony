@@ -1,6 +1,7 @@
 
 import React, { useState, useEffect } from 'react';
-import { useNavigate, useLocation } from 'react-router-dom';
+import { useNavigate, useLocation, Link } from 'react-router-dom';
+import { usePageMeta } from '@/hooks/usePageMeta';
 import { useAuth } from '@/contexts/AuthContext';
 import { 
   Users, Home, CalendarCheck, BookOpen, Calendar, HeartHandshake, 
@@ -17,6 +18,18 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+
+const SECTION_TITLES: Record<string, string> = {
+  dashboard: 'Dashboard',
+  children: 'Children',
+  attendance: 'Attendance',
+  lessons: 'Lessons',
+  events: 'Events',
+  partners: 'Partners',
+  reports: 'Reports',
+  profile: 'Profile',
+  settings: 'Settings',
+};
 
 interface NavItem {
   title: string;
@@ -61,6 +74,26 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
     setIsMobileMenuOpen(false);
   }, [location.pathname]);
 
+  // Mark the app as noindex (only the landing page is indexable)
+  usePageMeta({ noindex: true });
+
+  // Per-section document titles
+  useEffect(() => {
+    const segment = location.pathname.split('/').filter(Boolean)[0] || 'dashboard';
+    const section = SECTION_TITLES[segment] ?? 'KidMin Harmony';
+    document.title = `${section} \u2014 KidMin Harmony`;
+  }, [location.pathname]);
+
+  // Close mobile drawer with Escape (a11y)
+  useEffect(() => {
+    if (!isMobileMenuOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setIsMobileMenuOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isMobileMenuOpen]);
+
   if (!mounted) return null;
 
   return (
@@ -82,17 +115,18 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
               )}
               <span className="sr-only">Toggle menu</span>
             </Button>
-            <div 
-              className="flex items-center gap-2 cursor-pointer" 
-              onClick={() => navigate('/')}
+            <Link
+              to="/"
+              className="flex items-center gap-2 rounded-md"
+              aria-label="KidMin Harmony home"
             >
-              <div className="h-8 w-8 rounded-full bg-primary flex items-center justify-center">
-                <Users className="h-4 w-4 text-white" />
-              </div>
+              <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+                <Users className="h-4 w-4" />
+              </span>
               <span className="font-medium text-lg hidden sm:inline-block">
                 KidMin Harmony
               </span>
-            </div>
+            </Link>
           </div>
           
           {/* Desktop Navigation */}
@@ -177,7 +211,12 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             className="fixed inset-0 bg-black/50"
             onClick={() => setIsMobileMenuOpen(false)}
           />
-          <div className="relative w-4/5 max-w-xs h-full bg-background p-6 flex flex-col">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Navigation menu"
+            className="relative w-4/5 max-w-xs h-full bg-background p-6 flex flex-col"
+          >
             <div className="space-y-4">
               {filteredNavItems.map((item) => (
                 <Button

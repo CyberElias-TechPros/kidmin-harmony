@@ -5,26 +5,65 @@ import {
   verifyPassword,
   signToken,
   requireRole,
+  MisconfiguredError,
   type AuthUser,
   type Role,
 } from "./auth";
-import { json, error, notFound, id, corsHeaders, todayISO, type Env } from "./helpers";
+import {
+  json,
+  error,
+  notFound,
+  tooManyRequests,
+  id,
+  corsHeaders,
+  securityHeaders,
+  todayISO,
+  isValidEmail,
+  isValidDate,
+  clampLen,
+  type Env,
+} from "./helpers";
+import { rateLimit, clientIp } from "./rateLimit";
 
 const app = new Hono<{ Bindings: Env }>();
 
 // ---------------------------------------------------------------------------
-// CORS + preflight
+// Validation constants (mirror the frontend's controlled vocabularies)
+// ---------------------------------------------------------------------------
+const ROLES: string[] = ["admin", "teacher", "parent", "volunteer", "cellLeader", "partner"];
+const AGE_GROUPS = ["pre-school", "elementary", "pre-teen"];
+const GENDERS = ["male", "female", "other"];
+
+const MAX_UPLOAD_BYTES = 5 * 1024 * 1024; // 5 MB
+const ALLOWED_UPLOAD_TYPES: Record<string, string> = {
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  png: "image/png",
+  webp: "image/webp",
+  gif: "image/gif",
+};
+
+// ---------------------------------------------------------------------------
+// CORS + security headers + request logging
 // ---------------------------------------------------------------------------
 app.use("*", async (c, next) => {
+  const origin = c.req.header("origin") ?? null;
   if (c.req.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: corsHeaders(c.env.ALLOWED_ORIGINS) });
+    const headers = { ...corsHeaders(c.env.ALLOWED_ORIGINS, origin), ...securityHeaders() };
+    return new Response(null, { status: 204, headers });
   }
+  const start = Date.now();
   await next();
-  const headers = corsHeaders(c.env.ALLOWED_ORIGINS);
   const res = c.res;
   const newHeaders = new Headers(res.headers);
-  Object.entries(headers).forEach(([k, v]) => newHeaders.set(k, v));
+  Object.entries({ ...corsHeaders(c.env.ALLOWED_ORIGINS, origin), ...securityHeaders() }).forEach(([k, v]) =>
+    newHeaders.set(k, v)
+  );
   c.res = new Response(res.body, { status: res.status, headers: newHeaders });
+  const path = c.req.path;
+  if (!path.startsWith("/media/")) {
+    console.log(`${c.req.method} ${path} ${res.status} ${Date.now() - start}ms`);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -45,6 +84,8 @@ async function requireRoles(c: any, roles: Role[]): Promise<AuthUser> {
 }
 
 function handleError(e: unknown): Response {
+  if (e instanceof MisconfiguredError) return error(e.message, 503);
+  if (e instanceof JsonParseError) return error(e.message, 400);
   const msg = e instanceof Error ? e.message : String(e);
   if (msg === "UNAUTHORIZED") return error("Authentication required", 401);
   if (msg === "FORBIDDEN") return error("You do not have permission to perform this action", 403);
@@ -53,15 +94,16 @@ function handleError(e: unknown): Response {
   return error("Something went wrong", 500);
 }
 
-const ROLES = ["admin", "teacher", "parent", "volunteer", "cellLeader", "partner"];
-
-async function readBody<T = any>(c: any): Promise<T> {
+class JsonParseError extends Error {}
+const readBody = async <T = any>(c: any): Promise<T> => {
   try {
     return (await c.req.json()) as T;
   } catch {
-    return {} as T;
+    // Surface malformed JSON explicitly; an empty-object fallback would mask
+    // client bugs as misleading "field is required" errors.
+    throw new JsonParseError("Invalid JSON body");
   }
-}
+};
 
 function str(v: unknown): string | null {
   if (v === null || v === undefined) return null;
@@ -71,7 +113,7 @@ function str(v: unknown): string | null {
 
 function int(v: unknown, fallback = 0): number {
   const n = Number(v);
-  return Number.isFinite(n) ? n : fallback;
+  return Number.isFinite(n) ? Math.trunc(n) : fallback;
 }
 
 function bool(v: unknown): number {
@@ -179,30 +221,72 @@ function mapPartner(r: any) {
   };
 }
 
+/** Validate child payloads shared by POST and PUT. Returns an error message or null. */
+function validateChildInput(b: any): string | null {
+  const firstName = str(b.firstName)?.trim();
+  const lastName = str(b.lastName)?.trim();
+  if (!firstName || !lastName) return "First name and last name are required";
+  if (firstName.length > 100 || lastName.length > 100) return "Names are too long (max 100 characters)";
+  const dob = str(b.dob);
+  if (dob && !isValidDate(dob)) return "Date of birth must be a valid date (YYYY-MM-DD)";
+  const gender = str(b.gender);
+  if (gender && !GENDERS.includes(gender)) return "Invalid gender value";
+  const ageGroup = str(b.ageGroup);
+  if (ageGroup && !AGE_GROUPS.includes(ageGroup)) return "Invalid age group";
+  const parentEmail = str(b.parentEmail);
+  if (parentEmail && !isValidEmail(parentEmail)) return "Invalid parent email address";
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Health
 // ---------------------------------------------------------------------------
-app.get("/api/health", (c) => json({ ok: true, service: "kidmin-harmony-api", time: new Date().toISOString() }));
+app.get("/api/health", async (c) => {
+  let dbOk = true;
+  try {
+    await c.env.DB.prepare("SELECT 1").run();
+  } catch {
+    dbOk = false;
+  }
+  return json(
+    { ok: dbOk, service: "kidmin-harmony-api", db: dbOk ? "ok" : "error", time: new Date().toISOString() },
+    dbOk ? 200 : 503
+  );
+});
 
 // ---------------------------------------------------------------------------
-// Seed (only when SEED_DEMO is explicitly enabled)
+// Seed (only when SEED_DEMO is explicitly enabled AND called by an admin)
 // ---------------------------------------------------------------------------
 app.post("/api/auth/seed", async (c) => {
   if (c.env.SEED_DEMO !== "true") return error("Seeding is disabled", 403);
   try {
+    // Bootstrap rule: on a brand-new database (no users at all) the seed may
+    // run unauthenticated — that is how the first admin is created in local
+    // development. Once any user exists, re-seeding requires an admin token.
+    const userCount = (await c.env.DB.prepare("SELECT COUNT(*) AS n FROM users").first<any>())?.n ?? 0;
+    if (userCount > 0) {
+      const user = await currentUser(c);
+      if (!user || user.role !== "admin") return error("Admin authentication required", 403);
+    }
+
     const demoUsers = [
       { email: "admin@church.org", password: "admin123", name: "Admin User", role: "admin" },
       { email: "teacher@church.org", password: "teacher123", name: "Teacher Smith", role: "teacher" },
       { email: "parent@church.org", password: "parent123", name: "Parent Jones", role: "parent" },
     ];
+    const statements: D1PreparedStatement[] = [];
+    const existing = await c.env.DB.prepare("SELECT email FROM users WHERE email IN (?, ?, ?)")
+      .bind(demoUsers[0].email, demoUsers[1].email, demoUsers[2].email)
+      .all<any>();
+    const have = new Set((existing.results ?? []).map((r) => r.email));
     for (const u of demoUsers) {
-      const existing = await c.env.DB.prepare("SELECT id FROM users WHERE email = ?").bind(u.email).first();
-      if (!existing) {
+      if (!have.has(u.email)) {
         const userId = id();
         const passwordHash = await hashPassword(u.password);
-        await c.env.DB.prepare(
-          "INSERT INTO users (id, name, email, password_hash, role, avatar) VALUES (?, ?, ?, ?, ?, ?)"
-        ).bind(userId, u.name, u.email, passwordHash, u.role, `https://ui-avatars.com/api/?name=${encodeURIComponent(u.name)}&background=6366f1&color=fff`).run();
+        statements.push(
+          c.env.DB.prepare("INSERT INTO users (id, name, email, password_hash, role, avatar) VALUES (?, ?, ?, ?, ?, ?)")
+            .bind(userId, u.name, u.email, passwordHash, u.role, null)
+        );
       }
     }
 
@@ -211,6 +295,8 @@ app.post("/api/auth/seed", async (c) => {
     const childCount = (await c.env.DB.prepare("SELECT COUNT(*) AS n FROM children").first<any>())?.n ?? 0;
     if (childCount === 0) {
       const admin = await c.env.DB.prepare("SELECT id FROM users WHERE role = 'admin' LIMIT 1").first<any>();
+      const adminId = admin?.id ?? null;
+      const today = todayISO(c.env.APP_TIMEZONE);
 
       const sampleChildren = [
         { fn: "Emma", ln: "Johnson", dob: "2016-05-12", age: "elementary", pf: "Sarah", pl: "Johnson", pe: "parent@church.org", ph: "555-123-4567" },
@@ -224,28 +310,32 @@ app.post("/api/auth/seed", async (c) => {
       for (const ch of sampleChildren) {
         const cid = id();
         childIds.push(cid);
-        await c.env.DB.prepare(
-          `INSERT INTO children (id, first_name, last_name, dob, gender, age_group, allergies, church_member, parent_first_name, parent_last_name, parent_email, parent_phone, created_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        ).bind(cid, ch.fn, ch.ln, ch.dob, "female", ch.age, "None", 1, ch.pf, ch.pl, ch.pe, ch.ph, admin?.id ?? null).run();
+        statements.push(
+          c.env.DB.prepare(
+            `INSERT INTO children (id, first_name, last_name, dob, gender, age_group, allergies, church_member, parent_first_name, parent_last_name, parent_email, parent_phone, created_by)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ).bind(cid, ch.fn, ch.ln, ch.dob, "female", ch.age, "None", 1, ch.pf, ch.pl, ch.pe, ch.ph, adminId)
+        );
       }
 
-      // Create an attendance session for "today" and check in two children.
-      const today = todayISO();
+      // Attendance session for "today" with a few check-ins.
       const sessionId = id();
-      await c.env.DB.prepare(
-        "INSERT INTO attendance_sessions (id, date, service_type, created_by) VALUES (?, ?, ?, ?)"
-      ).bind(sessionId, today, "Sunday Morning", admin?.id ?? null).run();
-      const todayKey = today.replace(/-/g, "");
-      await c.env.DB.prepare(
-        "INSERT INTO attendance_records (id, session_id, child_id, checked_in_at, checked_by, status) VALUES (?, ?, ?, ?, ?, 'present')"
-      ).bind(id(), sessionId, childIds[0], `${today}T09:15:00.000Z`, "Teacher Smith").run();
-      await c.env.DB.prepare(
-        "INSERT INTO attendance_records (id, session_id, child_id, checked_in_at, checked_by, status) VALUES (?, ?, ?, ?, ?, 'present')"
-      ).bind(id(), sessionId, childIds[1], `${today}T09:22:00.000Z`, "Teacher Smith").run();
-      await c.env.DB.prepare(
-        "INSERT INTO attendance_records (id, session_id, child_id, checked_in_at, checked_by, status) VALUES (?, ?, ?, ?, ?, 'present')"
-      ).bind(id(), sessionId, childIds[2], `${today}T09:35:00.000Z`, "Admin User").run();
+      statements.push(
+        c.env.DB.prepare("INSERT INTO attendance_sessions (id, date, service_type, created_by) VALUES (?, ?, ?, ?)")
+          .bind(sessionId, today, "Sunday Morning", adminId)
+      );
+      const checkins = [
+        { child: childIds[0], at: `${today}T09:15:00.000Z`, by: "Teacher Smith" },
+        { child: childIds[1], at: `${today}T09:22:00.000Z`, by: "Teacher Smith" },
+        { child: childIds[2], at: `${today}T09:35:00.000Z`, by: "Admin User" },
+      ];
+      for (const ci of checkins) {
+        statements.push(
+          c.env.DB.prepare(
+            "INSERT INTO attendance_records (id, session_id, child_id, checked_in_at, checked_by, status) VALUES (?, ?, ?, ?, ?, 'present')"
+          ).bind(id(), sessionId, ci.child, ci.at, ci.by)
+        );
+      }
 
       // Upcoming + past events.
       const events = [
@@ -258,16 +348,22 @@ app.post("/api/auth/seed", async (c) => {
       for (const e of events) {
         const eid = id();
         eventIds.push(eid);
-        await c.env.DB.prepare(
-          `INSERT INTO events (id, title, description, start_date, end_date, start_time, end_time, location, capacity, age_group, requires_registration, status, created_by)
-           VALUES (?, ?, ?, ?, ?, '09:00', '14:00', ?, ?, 'all', 1, ?, ?)`
-        ).bind(eid, e.title, e.description, e.startDate, e.endDate, e.loc, e.cap, e.status, admin?.id ?? null).run();
+        statements.push(
+          c.env.DB.prepare(
+            `INSERT INTO events (id, title, description, start_date, end_date, start_time, end_time, location, capacity, age_group, requires_registration, status, created_by)
+             VALUES (?, ?, ?, ?, ?, '09:00', '14:00', ?, ?, 'all', 1, ?, ?)`
+          ).bind(eid, e.title, e.description, e.startDate, e.endDate, e.loc, e.cap, e.status, adminId)
+        );
       }
-      // Register a couple children to the first upcoming event.
-      await c.env.DB.prepare("INSERT INTO event_attendees (id, event_id, child_id, status) VALUES (?, ?, ?, 'confirmed')")
-        .bind(id(), eventIds[0], childIds[0]).run();
-      await c.env.DB.prepare("INSERT INTO event_attendees (id, event_id, child_id, status) VALUES (?, ?, ?, 'pending')")
-        .bind(id(), eventIds[0], childIds[1]).run();
+      // Register a couple of children to the first upcoming event.
+      statements.push(
+        c.env.DB.prepare("INSERT INTO event_attendees (id, event_id, child_id, status) VALUES (?, ?, ?, 'confirmed')")
+          .bind(id(), eventIds[0], childIds[0])
+      );
+      statements.push(
+        c.env.DB.prepare("INSERT INTO event_attendees (id, event_id, child_id, status) VALUES (?, ?, ?, 'pending')")
+          .bind(id(), eventIds[0], childIds[1])
+      );
 
       // Lessons.
       const lessons = [
@@ -280,16 +376,19 @@ app.post("/api/auth/seed", async (c) => {
       ];
       for (const l of lessons) {
         const lid = id();
-        await c.env.DB.prepare(
-          `INSERT INTO lessons (id, title, description, age_group, category, lesson_date, duration, created_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-        ).bind(lid, l.title, l.desc, l.age, l.cat, l.date, l.dur, admin?.id ?? null).run();
-        await c.env.DB.prepare("INSERT INTO lesson_objectives (id, lesson_id, text) VALUES (?, ?, ?)")
-          .bind(id(), lid, `Understand ${l.title}`).run();
-        await c.env.DB.prepare("INSERT INTO lesson_materials (id, lesson_id, name) VALUES (?, ?, ?)")
-          .bind(id(), lid, "Bibles").run();
-        await c.env.DB.prepare("INSERT INTO lesson_activities (id, lesson_id, name, description, duration, materials) VALUES (?, ?, ?, ?, ?, ?)")
-          .bind(id(), lid, "Discussion", "Group discussion about the lesson", 15, "Bibles").run();
+        statements.push(
+          c.env.DB.prepare(
+            `INSERT INTO lessons (id, title, description, age_group, category, lesson_date, duration, created_by)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+          ).bind(lid, l.title, l.desc, l.age, l.cat, l.date, l.dur, adminId)
+        );
+        statements.push(c.env.DB.prepare("INSERT INTO lesson_objectives (id, lesson_id, text) VALUES (?, ?, ?)").bind(id(), lid, `Understand ${l.title}`));
+        statements.push(c.env.DB.prepare("INSERT INTO lesson_materials (id, lesson_id, name) VALUES (?, ?, ?)").bind(id(), lid, "Bibles"));
+        statements.push(
+          c.env.DB.prepare(
+            "INSERT INTO lesson_activities (id, lesson_id, name, description, duration, materials) VALUES (?, ?, ?, ?, ?, ?)"
+          ).bind(id(), lid, "Discussion", "Group discussion about the lesson", 15, "Bibles")
+        );
       }
 
       // Partners.
@@ -299,17 +398,22 @@ app.post("/api/auth/seed", async (c) => {
         { name: "Faithful Volunteers Network", cp: "Michael Chang", email: "michael@faithfulvolunteers.org", type: "Service", notes: "Provides volunteer staff.", status: "active" },
       ];
       for (const p of partners) {
-        await c.env.DB.prepare(
-          `INSERT INTO partners (id, name, contact_person, email, phone, partnership_type, notes, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-        ).bind(id(), p.name, p.cp, p.email, "555-000-0000", p.type, p.notes, p.status).run();
+        statements.push(
+          c.env.DB.prepare(
+            `INSERT INTO partners (id, name, contact_person, email, phone, partnership_type, notes, status)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+          ).bind(id(), p.name, p.cp, p.email, "555-000-0000", p.type, p.notes, p.status)
+        );
       }
 
       // Sample volunteers on the first upcoming event.
-      await c.env.DB.prepare("INSERT INTO event_volunteers (id, event_id, name, role, assigned) VALUES (?, ?, ?, ?, ?)")
-        .bind(id(), eventIds[0], "James Wilson", "Group Leader", "Group A").run();
+      statements.push(
+        c.env.DB.prepare("INSERT INTO event_volunteers (id, event_id, name, role, assigned) VALUES (?, ?, ?, ?, ?)")
+          .bind(id(), eventIds[0], "James Wilson", "Group Leader", "Group A")
+      );
     }
 
+    if (statements.length > 0) await c.env.DB.batch(statements);
     return json({ ok: true, seeded: true });
   } catch (e) {
     return handleError(e);
@@ -320,16 +424,18 @@ app.post("/api/auth/seed", async (c) => {
 // Auth
 // ---------------------------------------------------------------------------
 app.post("/api/auth/register", async (c) => {
+  const ip = clientIp(c);
+  if (!rateLimit(`register:${ip}`, 10, 60 * 60 * 1000)) return tooManyRequests("Too many registration attempts, please try again later", 60 * 60);
   try {
     const body = await readBody(c);
-    const name = str(body.name)?.trim();
+    const name = clampLen(str(body.name)?.trim() ?? null, 100);
     const email = str(body.email)?.trim().toLowerCase();
     const password = str(body.password);
     let role = (str(body.role) || "parent") as Role;
 
     if (!name || !email || !password) return error("Name, email and password are required");
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return error("Invalid email address");
-    if (password.length < 6) return error("Password must be at least 6 characters");
+    if (!isValidEmail(email)) return error("Invalid email address");
+    if (password.length < 6 || password.length > 200) return error("Password must be between 6 and 200 characters");
     if (!ROLES.includes(role)) role = "parent";
     // Security: public self-registration is restricted to parents. Any staff
     // role (teacher, volunteer, cellLeader, partner) holds access to children's
@@ -343,17 +449,16 @@ app.post("/api/auth/register", async (c) => {
 
     const userId = id();
     const passwordHash = await hashPassword(password);
-    const avatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=6366f1&color=fff`;
 
     await c.env.DB.prepare(
       "INSERT INTO users (id, name, email, password_hash, role, avatar) VALUES (?, ?, ?, ?, ?, ?)"
     )
-      .bind(userId, name, email, passwordHash, role, avatar)
+      .bind(userId, name, email, passwordHash, role, null)
       .run();
 
-    const user: AuthUser = { id: userId, name, email, role, avatar };
+    const user: AuthUser = { id: userId, name, email, role };
     const token = await signToken(
-      { sub: user.id, name: user.name, email: user.email, role: user.role, avatar: user.avatar },
+      { sub: user.id, name: user.name, email: user.email, role: user.role },
       c.env.JWT_SECRET
     );
     return json({ token, user }, 201);
@@ -363,6 +468,8 @@ app.post("/api/auth/register", async (c) => {
 });
 
 app.post("/api/auth/login", async (c) => {
+  const ip = clientIp(c);
+  if (!rateLimit(`login:${ip}`, 20, 15 * 60 * 1000)) return tooManyRequests("Too many login attempts, please wait a few minutes", 15 * 60);
   try {
     const body = await readBody(c);
     const email = str(body.email)?.trim().toLowerCase();
@@ -387,7 +494,12 @@ app.post("/api/auth/login", async (c) => {
 });
 
 app.get("/api/auth/me", async (c) => {
-  const user = await currentUser(c);
+  let user: AuthUser | null;
+  try {
+    user = await currentUser(c);
+  } catch (e) {
+    return handleError(e);
+  }
   if (!user) return error("Authentication required", 401);
   const row = await c.env.DB.prepare("SELECT * FROM users WHERE id = ?").bind(user.id).first<any>();
   if (!row) return error("User not found", 404);
@@ -399,8 +511,8 @@ app.put("/api/auth/me", async (c) => {
     const user = await currentUser(c);
     if (!user) return error("Authentication required", 401);
     const b = await readBody(c);
-    const name = str(b.name)?.trim();
-    const avatar = str(b.avatar);
+    const name = clampLen(str(b.name)?.trim() ?? null, 100);
+    const avatar = clampLen(str(b.avatar), 2048);
     if (name) {
       await c.env.DB.prepare("UPDATE users SET name = ?, avatar = COALESCE(?, avatar), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?")
         .bind(name, avatar, user.id)
@@ -427,7 +539,7 @@ app.post("/api/auth/logout", async (c) => {
 // ---------------------------------------------------------------------------
 app.get("/api/children", async (c) => {
   try {
-    const user = await requireRoles(c, ["admin", "teacher", "parent", "volunteer", "cellLeader", "partner"]);
+    const user = await requireRoles(c, ["admin", "teacher", "parent", "volunteer", "cellLeader"]);
     let result: D1Result<any>;
     if (user.role === "parent") {
       result = await c.env.DB.prepare("SELECT * FROM children WHERE parent_email = ? ORDER BY created_at DESC")
@@ -444,7 +556,7 @@ app.get("/api/children", async (c) => {
 
 app.get("/api/children/:id", async (c) => {
   try {
-    const user = await requireRoles(c, ["admin", "teacher", "parent", "volunteer", "cellLeader", "partner"]);
+    const user = await requireRoles(c, ["admin", "teacher", "parent", "volunteer", "cellLeader"]);
     const childId = c.req.param("id");
     const row = await c.env.DB.prepare("SELECT * FROM children WHERE id = ?").bind(childId).first<any>();
     if (!row) return notFound("Child not found");
@@ -481,10 +593,11 @@ app.post("/api/children", async (c) => {
   try {
     const user = await requireRoles(c, ["admin", "teacher"]);
     const b = await readBody(c);
+    const invalid = validateChildInput(b);
+    if (invalid) return error(invalid);
+
     const firstName = str(b.firstName)?.trim();
     const lastName = str(b.lastName)?.trim();
-    if (!firstName || !lastName) return error("First name and last name are required");
-
     const childId = id();
     await c.env.DB.prepare(
       `INSERT INTO children (
@@ -499,24 +612,24 @@ app.post("/api/children", async (c) => {
         childId,
         firstName,
         lastName,
-        str(b.dob),
-        str(b.gender),
-        str(b.ageGroup),
-        str(b.allergies),
-        str(b.medicalNotes),
+        clampLen(str(b.dob), 10),
+        clampLen(str(b.gender), 20),
+        clampLen(str(b.ageGroup), 30),
+        clampLen(str(b.allergies), 500),
+        clampLen(str(b.medicalNotes), 2000),
         bool(b.churchMember),
-        str(b.parentFirstName),
-        str(b.parentLastName),
-        str(b.parentEmail),
-        str(b.parentPhone),
-        str(b.address),
-        str(b.city),
-        str(b.state),
-        str(b.zipCode),
-        str(b.emergencyContactName),
-        str(b.emergencyContactRelation),
-        str(b.emergencyContactPhone),
-        str(b.photoUrl),
+        clampLen(str(b.parentFirstName), 100),
+        clampLen(str(b.parentLastName), 100),
+        clampLen(str(b.parentEmail)?.toLowerCase() ?? null, 254),
+        clampLen(str(b.parentPhone), 50),
+        clampLen(str(b.address), 255),
+        clampLen(str(b.city), 100),
+        clampLen(str(b.state), 100),
+        clampLen(str(b.zipCode), 20),
+        clampLen(str(b.emergencyContactName), 150),
+        clampLen(str(b.emergencyContactRelation), 50),
+        clampLen(str(b.emergencyContactPhone), 50),
+        clampLen(str(b.photoUrl), 2048),
         user.id
       )
       .run();
@@ -532,7 +645,13 @@ app.put("/api/children/:id", async (c) => {
   try {
     const user = await requireRoles(c, ["admin", "teacher"]);
     const childId = c.req.param("id");
+    const existing = await c.env.DB.prepare("SELECT id FROM children WHERE id = ?").bind(childId).first();
+    if (!existing) return notFound("Child not found");
+
     const b = await readBody(c);
+    const invalid = validateChildInput(b);
+    if (invalid) return error(invalid);
+
     await c.env.DB.prepare(
       `UPDATE children SET
         first_name = ?, last_name = ?, dob = ?, gender = ?, age_group = ?, allergies = ?, medical_notes = ?,
@@ -543,26 +662,26 @@ app.put("/api/children/:id", async (c) => {
       WHERE id = ?`
     )
       .bind(
-        str(b.firstName),
-        str(b.lastName),
-        str(b.dob),
-        str(b.gender),
-        str(b.ageGroup),
-        str(b.allergies),
-        str(b.medicalNotes),
+        str(b.firstName)?.trim(),
+        str(b.lastName)?.trim(),
+        clampLen(str(b.dob), 10),
+        clampLen(str(b.gender), 20),
+        clampLen(str(b.ageGroup), 30),
+        clampLen(str(b.allergies), 500),
+        clampLen(str(b.medicalNotes), 2000),
         bool(b.churchMember),
-        str(b.parentFirstName),
-        str(b.parentLastName),
-        str(b.parentEmail),
-        str(b.parentPhone),
-        str(b.address),
-        str(b.city),
-        str(b.state),
-        str(b.zipCode),
-        str(b.emergencyContactName),
-        str(b.emergencyContactRelation),
-        str(b.emergencyContactPhone),
-        str(b.photoUrl),
+        clampLen(str(b.parentFirstName), 100),
+        clampLen(str(b.parentLastName), 100),
+        clampLen(str(b.parentEmail)?.toLowerCase() ?? null, 254),
+        clampLen(str(b.parentPhone), 50),
+        clampLen(str(b.address), 255),
+        clampLen(str(b.city), 100),
+        clampLen(str(b.state), 100),
+        clampLen(str(b.zipCode), 20),
+        clampLen(str(b.emergencyContactName), 150),
+        clampLen(str(b.emergencyContactRelation), 50),
+        clampLen(str(b.emergencyContactPhone), 50),
+        clampLen(str(b.photoUrl), 2048),
         childId
       )
       .run();
@@ -581,6 +700,7 @@ app.delete("/api/children/:id", async (c) => {
     const childId = c.req.param("id");
     const row = await c.env.DB.prepare("SELECT id FROM children WHERE id = ?").bind(childId).first();
     if (!row) return notFound("Child not found");
+    // FKs with ON DELETE CASCADE remove notes, attendance and event records.
     await c.env.DB.prepare("DELETE FROM children WHERE id = ?").bind(childId).run();
     return json({ ok: true });
   } catch (e) {
@@ -592,14 +712,16 @@ app.post("/api/children/:id/notes", async (c) => {
   try {
     const user = await requireRoles(c, ["admin", "teacher"]);
     const childId = c.req.param("id");
+    const child = await c.env.DB.prepare("SELECT id FROM children WHERE id = ?").bind(childId).first();
+    if (!child) return notFound("Child not found");
     const b = await readBody(c);
-    const text = str(b.text)?.trim();
+    const text = clampLen(str(b.text)?.trim() ?? null, 2000);
     if (!text) return error("Note text is required");
     const noteId = id();
     await c.env.DB.prepare(
       "INSERT INTO child_notes (id, child_id, author, text) VALUES (?, ?, ?, ?)"
     )
-      .bind(noteId, childId, str(b.author) || user.name, text)
+      .bind(noteId, childId, clampLen(str(b.author)?.trim() ?? null, 100) || user.name, text)
       .run();
     const note = await c.env.DB.prepare("SELECT * FROM child_notes WHERE id = ?").bind(noteId).first<any>();
     return json({ note: { id: note.id, author: note.author, text: note.text, date: note.created_at } }, 201);
@@ -611,7 +733,10 @@ app.post("/api/children/:id/notes", async (c) => {
 app.delete("/api/children/:id/notes/:noteId", async (c) => {
   try {
     await requireRoles(c, ["admin", "teacher"]);
-    await c.env.DB.prepare("DELETE FROM child_notes WHERE id = ?").bind(c.req.param("noteId")).run();
+    const res = await c.env.DB.prepare("DELETE FROM child_notes WHERE id = ? AND child_id = ?")
+      .bind(c.req.param("noteId"), c.req.param("id"))
+      .run();
+    if ((res.meta?.changes ?? 0) === 0) return notFound("Note not found");
     return json({ ok: true });
   } catch (e) {
     return handleError(e);
@@ -623,7 +748,8 @@ app.delete("/api/children/:id/notes/:noteId", async (c) => {
 // ---------------------------------------------------------------------------
 app.get("/api/attendance", async (c) => {
   try {
-    const user = await requireRoles(c, ["admin", "teacher", "volunteer", "cellLeader", "partner"]);
+    await requireRoles(c, ["admin", "teacher", "volunteer", "cellLeader"]);
+    const today = todayISO(c.env.APP_TIMEZONE);
     const sessions = await c.env.DB.prepare(
       "SELECT s.*, COUNT(ar.id) AS present_count FROM attendance_sessions s LEFT JOIN attendance_records ar ON ar.session_id = s.id GROUP BY s.id ORDER BY s.date DESC"
     ).all<any>();
@@ -631,7 +757,7 @@ app.get("/api/attendance", async (c) => {
     const total = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM children").first<any>();
     const presentToday = await c.env.DB.prepare(
       "SELECT COUNT(DISTINCT ar.child_id) AS n FROM attendance_records ar JOIN attendance_sessions s ON s.id = ar.session_id WHERE s.date = ?"
-    ).bind(todayISO()).first<any>();
+    ).bind(today).first<any>();
 
     return json({
       sessions: sessions.results.map((s) => ({
@@ -654,14 +780,16 @@ app.post("/api/attendance/sessions", async (c) => {
   try {
     const user = await requireRoles(c, ["admin", "teacher"]);
     const b = await readBody(c);
+    const date = isValidDate(str(b.date) ?? "", true) ? str(b.date) : todayISO(c.env.APP_TIMEZONE);
+    const serviceType = clampLen(str(b.serviceType)?.trim() ?? null, 100) || "Sunday Morning";
     const sessionId = id();
-    const date = str(b.date) || todayISO();
-    const serviceType = str(b.serviceType) || "Sunday Morning";
-    await c.env.DB.prepare(
-      "INSERT INTO attendance_sessions (id, date, service_type, created_by) VALUES (?, ?, ?, ?)"
-    )
-      .bind(sessionId, date, serviceType, user.id)
-      .run();
+    try {
+      await c.env.DB.prepare(
+        "INSERT INTO attendance_sessions (id, date, service_type, created_by) VALUES (?, ?, ?, ?)"
+      ).bind(sessionId, date, serviceType, user.id).run();
+    } catch {
+      return error("A session already exists for this date and service type", 409);
+    }
     const row = await c.env.DB.prepare("SELECT * FROM attendance_sessions WHERE id = ?").bind(sessionId).first<any>();
     return json({ session: { id: row.id, date: row.date, serviceType: row.service_type } }, 201);
   } catch (e) {
@@ -679,34 +807,64 @@ app.post("/api/attendance/checkin", async (c) => {
     const child = await c.env.DB.prepare("SELECT id FROM children WHERE id = ?").bind(childId).first();
     if (!child) return notFound("Child not found");
 
-    const date = str(b.date) || todayISO();
-    const serviceType = str(b.serviceType) || "Sunday Morning";
+    const today = todayISO(c.env.APP_TIMEZONE);
+    const date = isValidDate(str(b.date) ?? "", true) ? str(b.date) : today;
+    const serviceType = clampLen(str(b.serviceType)?.trim() ?? null, 100) || "Sunday Morning";
+    const checkedInAt = new Date().toISOString();
+
+    // 1) Resolve the target session (explicit id, existing for date+type, or create).
     let sessionId = str(b.sessionId);
-    if (!sessionId) {
+    if (sessionId) {
+      const session = await c.env.DB.prepare("SELECT id FROM attendance_sessions WHERE id = ?").bind(sessionId).first();
+      if (!session) return notFound("Session not found");
+    } else {
       const existing = await c.env.DB.prepare(
         "SELECT id FROM attendance_sessions WHERE date = ? AND service_type = ?"
       ).bind(date, serviceType).first<any>();
-      if (existing) {
+      sessionId = existing ? existing.id : null;
+    }
+
+    const insertRecord = () =>
+      c.env.DB.prepare(
+        "INSERT INTO attendance_records (id, session_id, child_id, checked_in_at, checked_by, status) VALUES (?, ?, ?, ?, ?, 'present')"
+      ).bind(id(), sessionId as string, childId, checkedInAt, user.name).run();
+
+    // 2) If we must create the session, do it atomically with the record.
+    if (!sessionId) {
+      const newSessionId = id();
+      const newRecordId = id();
+      try {
+        await c.env.DB.batch([
+          c.env.DB.prepare(
+            "INSERT INTO attendance_sessions (id, date, service_type, created_by) VALUES (?, ?, ?, ?)"
+          ).bind(newSessionId, date, serviceType, user.id),
+          c.env.DB.prepare(
+            "INSERT INTO attendance_records (id, session_id, child_id, checked_in_at, checked_by, status) VALUES (?, ?, ?, ?, ?, 'present')"
+          ).bind(newRecordId, newSessionId, childId, checkedInAt, user.name),
+        ]);
+        return json({ ok: true, recordId: newRecordId, childId, checkedInAt }, 201);
+      } catch {
+        // Lost a race: another request created the same session. Retry against it.
+        const existing = await c.env.DB.prepare(
+          "SELECT id FROM attendance_sessions WHERE date = ? AND service_type = ?"
+        ).bind(date, serviceType).first<any>();
+        if (!existing) throw new Error("Failed to create attendance session");
         sessionId = existing.id;
-      } else {
-        sessionId = id();
-        await c.env.DB.prepare(
-          "INSERT INTO attendance_sessions (id, date, service_type, created_by) VALUES (?, ?, ?, ?)"
-        ).bind(sessionId, date, serviceType, user.id).run();
       }
     }
 
+    // 3) Insert the record; the UNIQUE(session_id, child_id) constraint makes
+    //    duplicate check-ins idempotent.
     const existingRecord = await c.env.DB.prepare(
       "SELECT id FROM attendance_records WHERE session_id = ? AND child_id = ?"
     ).bind(sessionId, childId).first();
     if (existingRecord) return json({ alreadyCheckedIn: true });
-
-    const recordId = id();
-    await c.env.DB.prepare(
-      "INSERT INTO attendance_records (id, session_id, child_id, checked_by, status) VALUES (?, ?, ?, ?, 'present')"
-    ).bind(recordId, sessionId, childId, user.name).run();
-
-    return json({ ok: true, recordId, childId, checkedInAt: new Date().toISOString() }, 201);
+    try {
+      await insertRecord();
+    } catch {
+      return json({ alreadyCheckedIn: true });
+    }
+    return json({ ok: true, childId, checkedInAt }, 201);
   } catch (e) {
     return handleError(e);
   }
@@ -714,7 +872,7 @@ app.post("/api/attendance/checkin", async (c) => {
 
 app.get("/api/attendance/:id", async (c) => {
   try {
-    await requireRoles(c, ["admin", "teacher", "volunteer", "cellLeader", "partner"]);
+    await requireRoles(c, ["admin", "teacher", "volunteer", "cellLeader"]);
     const sessionId = c.req.param("id");
     const session = await c.env.DB.prepare("SELECT * FROM attendance_sessions WHERE id = ?").bind(sessionId).first<any>();
     if (!session) return notFound("Session not found");
@@ -743,27 +901,25 @@ app.get("/api/attendance/:id", async (c) => {
 // ---------------------------------------------------------------------------
 app.get("/api/events", async (c) => {
   try {
-    await requireRoles(c, ["admin", "teacher", "parent", "volunteer", "cellLeader", "partner"]);
-    const rows = await c.env.DB.prepare("SELECT * FROM events ORDER BY start_date").all<any>();
-    const today = todayISO();
-    const all = rows.results.map((r) => {
+    await requireRoles(c, ["admin", "teacher", "parent", "volunteer", "cellLeader"]);
+    const today = todayISO(c.env.APP_TIMEZONE);
+    const [rows, counts] = await Promise.all([
+      c.env.DB.prepare("SELECT * FROM events ORDER BY start_date").all<any>(),
+      c.env.DB.prepare("SELECT event_id, COUNT(*) AS n FROM event_attendees GROUP BY event_id").all<any>(),
+    ]);
+    const countMap: Record<string, number> = {};
+    for (const r of counts.results) countMap[r.event_id] = r.n;
+
+    const events = rows.results.map((r) => {
       const e = mapEvent(r);
       const status = e.startDate < today ? "past" : "upcoming";
-      const attendees = c.env.DB.prepare("SELECT COUNT(*) AS n FROM event_attendees WHERE event_id = ?").bind(r.id).first<any>();
-      return { ...e, status, registeredAttendees: 0 };
+      return { ...e, status, registeredAttendees: countMap[r.id] ?? 0 };
     });
-    const withCounts = await Promise.all(
-      all.map(async (e) => {
-        const count = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM event_attendees WHERE event_id = ?").bind(e.id).first<any>();
-        return { ...e, registeredAttendees: count?.n ?? 0 };
-      })
-    );
+
     return json({
-      events: withCounts,
-      upcoming: withCounts.filter((e) => e.status === "upcoming"),
-      past: withCounts
-        .filter((e) => e.status === "past")
-        .sort((a, b) => (a.startDate < b.startDate ? 1 : -1)),
+      events,
+      upcoming: events.filter((e) => e.status === "upcoming"),
+      past: events.filter((e) => e.status === "past").sort((a, b) => (a.startDate < b.startDate ? 1 : -1)),
     });
   } catch (e) {
     return handleError(e);
@@ -772,7 +928,7 @@ app.get("/api/events", async (c) => {
 
 app.get("/api/events/:id", async (c) => {
   try {
-    await requireRoles(c, ["admin", "teacher", "parent", "volunteer", "cellLeader", "partner"]);
+    await requireRoles(c, ["admin", "teacher", "parent", "volunteer", "cellLeader"]);
     const eventId = c.req.param("id");
     const row = await c.env.DB.prepare("SELECT * FROM events WHERE id = ?").bind(eventId).first<any>();
     if (!row) return notFound("Event not found");
@@ -806,74 +962,107 @@ app.get("/api/events/:id", async (c) => {
   }
 });
 
+/** Validate event create/update payloads. Returns [error, normalized] tuple. */
+function validateEventInput(b: any): [string, null] | [null, {
+  title: string; description: string | null; startDate: string; endDate: string;
+  startTime: string | null; endTime: string | null; location: string | null; address: string | null;
+  capacity: number; ageGroup: string; requiresRegistration: number; imageUrl: string | null;
+}] {
+  const title = clampLen(str(b.title)?.trim() ?? null, 200);
+  if (!title) return ["Event title is required", null];
+  const startDate = str(b.startDate) ?? todayISO();
+  if (!isValidDate(startDate, true)) return ["Invalid start date (YYYY-MM-DD)", null];
+  const endDate = str(b.endDate) ?? startDate;
+  if (!isValidDate(endDate, true)) return ["Invalid end date (YYYY-MM-DD)", null];
+  if (endDate < startDate) return ["End date must be on or after the start date", null];
+  const capacity = int(b.capacity, 0);
+  if (capacity < 0 || capacity > 1_000_000) return ["Capacity must be a non-negative number", null];
+  return [null, {
+    title,
+    description: clampLen(str(b.description), 5000),
+    startDate,
+    endDate,
+    startTime: clampLen(str(b.startTime), 10),
+    endTime: clampLen(str(b.endTime), 10),
+    location: clampLen(str(b.location), 255),
+    address: clampLen(str(b.address), 255),
+    capacity,
+    ageGroup: clampLen(str(b.ageGroup), 30) || "all",
+    requiresRegistration: bool(b.requiresRegistration === undefined ? true : b.requiresRegistration),
+    imageUrl: clampLen(str(b.imageUrl), 2048),
+  }];
+}
+
 app.post("/api/events", async (c) => {
   try {
     const user = await requireRoles(c, ["admin", "teacher"]);
-    const b = await readBody(c);
-    const title = str(b.title)?.trim();
-    if (!title) return error("Event title is required");
+    const [err, parsed] = validateEventInput(await readBody(c));
+    if (err || !parsed) return error(err ?? "Invalid event data");
+    const e = parsed;
     const eventId = id();
-    const startDate = str(b.startDate) || todayISO();
-    const endDate = str(b.endDate) || startDate;
     await c.env.DB.prepare(
       `INSERT INTO events (id, title, description, start_date, end_date, start_time, end_time, location, address, capacity, age_group, requires_registration, image_url, status, created_by)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
       .bind(
         eventId,
-        title,
-        str(b.description),
-        startDate,
-        endDate,
-        str(b.startTime),
-        str(b.endTime),
-        str(b.location),
-        str(b.address),
-        int(b.capacity),
-        str(b.ageGroup) || "all",
-        bool(b.requiresRegistration === undefined ? true : b.requiresRegistration),
-        str(b.imageUrl),
-        startDate < todayISO() ? "past" : "upcoming",
+        e.title,
+        e.description,
+        e.startDate,
+        e.endDate,
+        e.startTime,
+        e.endTime,
+        e.location,
+        e.address,
+        e.capacity,
+        e.ageGroup,
+        e.requiresRegistration,
+        e.imageUrl,
+        e.startDate < todayISO(c.env.APP_TIMEZONE) ? "past" : "upcoming",
         user.id
       )
       .run();
     const row = await c.env.DB.prepare("SELECT * FROM events WHERE id = ?").bind(eventId).first<any>();
     return json({ event: mapEvent(row) }, 201);
-  } catch (e) {
-    return handleError(e);
+  } catch (e2) {
+    return handleError(e2);
   }
 });
 
 app.put("/api/events/:id", async (c) => {
   try {
-    await requireRoles(c, ["admin", "teacher"]);
+    const user = await requireRoles(c, ["admin", "teacher"]);
     const eventId = c.req.param("id");
-    const b = await readBody(c);
+    const existing = await c.env.DB.prepare("SELECT id FROM events WHERE id = ?").bind(eventId).first();
+    if (!existing) return notFound("Event not found");
+    const [err, parsed] = validateEventInput(await readBody(c));
+    if (err || !parsed) return error(err ?? "Invalid event data");
+    const e = parsed;
     await c.env.DB.prepare(
       `UPDATE events SET title=?, description=?, start_date=?, end_date=?, start_time=?, end_time=?, location=?, address=?, capacity=?, age_group=?, requires_registration=?, image_url=?, status=?, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?`
     )
       .bind(
-        str(b.title),
-        str(b.description),
-        str(b.startDate),
-        str(b.endDate),
-        str(b.startTime),
-        str(b.endTime),
-        str(b.location),
-        str(b.address),
-        int(b.capacity),
-        str(b.ageGroup) || "all",
-        bool(b.requiresRegistration === undefined ? true : b.requiresRegistration),
-        str(b.imageUrl),
-        (str(b.startDate) || todayISO()) < todayISO() ? "past" : "upcoming",
+        e.title,
+        e.description,
+        e.startDate,
+        e.endDate,
+        e.startTime,
+        e.endTime,
+        e.location,
+        e.address,
+        e.capacity,
+        e.ageGroup,
+        e.requiresRegistration,
+        e.imageUrl,
+        e.startDate < todayISO(c.env.APP_TIMEZONE) ? "past" : "upcoming",
         eventId
       )
       .run();
     const row = await c.env.DB.prepare("SELECT * FROM events WHERE id = ?").bind(eventId).first<any>();
     if (!row) return notFound("Event not found");
     return json({ event: mapEvent(row) });
-  } catch (e) {
-    return handleError(e);
+  } catch (e2) {
+    return handleError(e2);
   }
 });
 
@@ -883,6 +1072,7 @@ app.delete("/api/events/:id", async (c) => {
     const eventId = c.req.param("id");
     const row = await c.env.DB.prepare("SELECT id FROM events WHERE id = ?").bind(eventId).first();
     if (!row) return notFound("Event not found");
+    // FKs with ON DELETE CASCADE remove attendees and volunteers.
     await c.env.DB.prepare("DELETE FROM events WHERE id = ?").bind(eventId).run();
     return json({ ok: true });
   } catch (e) {
@@ -894,6 +1084,9 @@ app.post("/api/events/:id/attendees", async (c) => {
   try {
     const user = await requireRoles(c, ["admin", "teacher", "parent"]);
     const eventId = c.req.param("id");
+    const event = await c.env.DB.prepare("SELECT * FROM events WHERE id = ?").bind(eventId).first<any>();
+    if (!event) return notFound("Event not found");
+
     const b = await readBody(c);
     const childId = str(b.childId);
     if (!childId) return error("childId is required");
@@ -904,6 +1097,12 @@ app.post("/api/events/:id/attendees", async (c) => {
     const existing = await c.env.DB.prepare("SELECT id FROM event_attendees WHERE event_id = ? AND child_id = ?")
       .bind(eventId, childId).first();
     if (existing) return json({ alreadyRegistered: true });
+
+    if (event.capacity > 0) {
+      const count = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM event_attendees WHERE event_id = ?")
+        .bind(eventId).first<any>();
+      if ((count?.n ?? 0) >= event.capacity) return error("This event is full", 409);
+    }
 
     const attendeeId = id();
     await c.env.DB.prepare(
@@ -930,13 +1129,15 @@ app.post("/api/events/:id/volunteers", async (c) => {
   try {
     await requireRoles(c, ["admin", "teacher"]);
     const eventId = c.req.param("id");
+    const event = await c.env.DB.prepare("SELECT id FROM events WHERE id = ?").bind(eventId).first();
+    if (!event) return notFound("Event not found");
     const b = await readBody(c);
-    const name = str(b.name)?.trim();
+    const name = clampLen(str(b.name)?.trim() ?? null, 150);
     if (!name) return error("Volunteer name is required");
     const volunteerId = id();
     await c.env.DB.prepare(
       "INSERT INTO event_volunteers (id, event_id, name, role, assigned) VALUES (?, ?, ?, ?, ?)"
-    ).bind(volunteerId, eventId, name, str(b.role), str(b.assigned)).run();
+    ).bind(volunteerId, eventId, name, clampLen(str(b.role), 100), clampLen(str(b.assigned), 100)).run();
     return json({ ok: true, volunteerId }, 201);
   } catch (e) {
     return handleError(e);
@@ -946,8 +1147,8 @@ app.post("/api/events/:id/volunteers", async (c) => {
 app.delete("/api/events/:id/volunteers/:volunteerId", async (c) => {
   try {
     await requireRoles(c, ["admin", "teacher"]);
-    await c.env.DB.prepare("DELETE FROM event_volunteers WHERE id = ?")
-      .bind(c.req.param("volunteerId")).run();
+    await c.env.DB.prepare("DELETE FROM event_volunteers WHERE id = ? AND event_id = ?")
+      .bind(c.req.param("volunteerId"), c.req.param("id")).run();
     return json({ ok: true });
   } catch (e) {
     return handleError(e);
@@ -959,7 +1160,7 @@ app.delete("/api/events/:id/volunteers/:volunteerId", async (c) => {
 // ---------------------------------------------------------------------------
 app.get("/api/lessons", async (c) => {
   try {
-    await requireRoles(c, ["admin", "teacher", "parent", "volunteer", "cellLeader", "partner"]);
+    await requireRoles(c, ["admin", "teacher", "parent", "volunteer", "cellLeader"]);
     const rows = await c.env.DB.prepare("SELECT * FROM lessons ORDER BY lesson_date DESC").all<any>();
     return json({ lessons: rows.results.map(mapLesson) });
   } catch (e) {
@@ -967,66 +1168,93 @@ app.get("/api/lessons", async (c) => {
   }
 });
 
+// Shared detail response so GET and PUT return identical shapes.
+async function lessonDetailResponse(c: any, lessonId: string) {
+  const row = await c.env.DB.prepare("SELECT * FROM lessons WHERE id = ?").bind(lessonId).first();
+  if (!row) return notFound("Lesson not found");
+  const [objectives, materials, activities] = await Promise.all([
+    c.env.DB.prepare("SELECT * FROM lesson_objectives WHERE lesson_id = ?").bind(lessonId).all(),
+    c.env.DB.prepare("SELECT * FROM lesson_materials WHERE lesson_id = ?").bind(lessonId).all(),
+    c.env.DB.prepare("SELECT * FROM lesson_activities WHERE lesson_id = ?").bind(lessonId).all(),
+  ]);
+  return json({
+    lesson: mapLesson(row),
+    objectives: objectives.results.map((o: any) => o.text),
+    materials: materials.results.map((m: any) => m.name),
+    activities: activities.results.map((a: any) => ({
+      name: a.name,
+      description: a.description,
+      duration: a.duration,
+      materials: a.materials ? a.materials.split("|").filter(Boolean) : [],
+    })),
+  });
+}
+
 app.get("/api/lessons/:id", async (c) => {
   try {
-    await requireRoles(c, ["admin", "teacher", "parent", "volunteer", "cellLeader", "partner"]);
-    const lessonId = c.req.param("id");
-    const row = await c.env.DB.prepare("SELECT * FROM lessons WHERE id = ?").bind(lessonId).first<any>();
-    if (!row) return notFound("Lesson not found");
-
-    const objectives = await c.env.DB.prepare("SELECT * FROM lesson_objectives WHERE lesson_id = ?").bind(lessonId).all<any>();
-    const materials = await c.env.DB.prepare("SELECT * FROM lesson_materials WHERE lesson_id = ?").bind(lessonId).all<any>();
-    const activities = await c.env.DB.prepare("SELECT * FROM lesson_activities WHERE lesson_id = ?").bind(lessonId).all<any>();
-
-    return json({
-      lesson: mapLesson(row),
-      objectives: objectives.results.map((o) => o.text),
-      materials: materials.results.map((m) => m.name),
-      activities: activities.results.map((a) => ({
-        name: a.name,
-        description: a.description,
-        duration: a.duration,
-        materials: a.materials ? a.materials.split("|").filter(Boolean) : [],
-      })),
-    });
+    await requireRoles(c, ["admin", "teacher", "parent", "volunteer", "cellLeader"]);
+    return await lessonDetailResponse(c, c.req.param("id"));
   } catch (e) {
     return handleError(e);
   }
 });
 
+/** Build D1 statements for a lesson's child rows (objectives/materials/activities). */
+function lessonChildStatements(db: D1Database, b: any, lessonId: string): D1PreparedStatement[] {
+  const stmts: D1PreparedStatement[] = [];
+  for (const obj of Array.isArray(b.objectives) ? b.objectives : []) {
+    const text = clampLen(str(obj)?.trim() ?? null, 500);
+    if (text) stmts.push(db.prepare("INSERT INTO lesson_objectives (id, lesson_id, text) VALUES (?, ?, ?)").bind(id(), lessonId, text));
+  }
+  for (const mat of Array.isArray(b.materials) ? b.materials : []) {
+    const name = clampLen(str(mat)?.trim() ?? null, 200);
+    if (name) stmts.push(db.prepare("INSERT INTO lesson_materials (id, lesson_id, name) VALUES (?, ?, ?)").bind(id(), lessonId, name));
+  }
+  for (const activity of Array.isArray(b.activities) ? b.activities : []) {
+    const name = clampLen(str(activity.name)?.trim() ?? null, 200);
+    if (!name) continue;
+    const mats = Array.isArray(activity.materials) ? activity.materials.map((m: unknown) => clampLen(str(m), 100) ?? "").join("|") : "";
+    stmts.push(
+      db.prepare(
+        "INSERT INTO lesson_activities (id, lesson_id, name, description, duration, materials) VALUES (?, ?, ?, ?, ?, ?)"
+      ).bind(id(), lessonId, name, clampLen(str(activity.description), 1000), int(activity.duration), mats)
+    );
+  }
+  return stmts;
+}
+
+function validateLessonCore(b: any): string | null {
+  const title = str(b.title)?.trim();
+  if (!title) return "Lesson title is required";
+  if (title.length > 200) return "Lesson title is too long (max 200 characters)";
+  const date = str(b.date);
+  if (date && !isValidDate(date, true)) return "Invalid lesson date (YYYY-MM-DD)";
+  return null;
+}
+
 app.post("/api/lessons", async (c) => {
   try {
     const user = await requireRoles(c, ["admin", "teacher"]);
     const b = await readBody(c);
-    const title = str(b.title)?.trim();
-    if (!title) return error("Lesson title is required");
+    const invalid = validateLessonCore(b);
+    if (invalid) return error(invalid);
     const lessonId = id();
-    await c.env.DB.prepare(
-      `INSERT INTO lessons (id, title, description, age_group, category, lesson_date, duration, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-    )
-      .bind(lessonId, title, str(b.description), str(b.ageGroup), str(b.category), str(b.date), int(b.duration), user.id)
-      .run();
-
-    for (const obj of Array.isArray(b.objectives) ? b.objectives : []) {
-      const text = str(obj)?.trim();
-      if (text) await c.env.DB.prepare("INSERT INTO lesson_objectives (id, lesson_id, text) VALUES (?, ?, ?)")
-        .bind(id(), lessonId, text).run();
-    }
-    for (const mat of Array.isArray(b.materials) ? b.materials : []) {
-      const name = str(mat)?.trim();
-      if (name) await c.env.DB.prepare("INSERT INTO lesson_materials (id, lesson_id, name) VALUES (?, ?, ?)")
-        .bind(id(), lessonId, name).run();
-    }
-    for (const activity of Array.isArray(b.activities) ? b.activities : []) {
-      const name = str(activity.name)?.trim();
-      if (!name) continue;
-      const mats = Array.isArray(activity.materials) ? activity.materials.join("|") : "";
-      await c.env.DB.prepare(
-        "INSERT INTO lesson_activities (id, lesson_id, name, description, duration, materials) VALUES (?, ?, ?, ?, ?, ?)"
-      ).bind(id(), lessonId, name, str(activity.description), int(activity.duration), mats).run();
-    }
-
+    await c.env.DB.batch([
+      c.env.DB.prepare(
+        `INSERT INTO lessons (id, title, description, age_group, category, lesson_date, duration, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        lessonId,
+        str(b.title)?.trim(),
+        clampLen(str(b.description), 5000),
+        clampLen(str(b.ageGroup), 30),
+        clampLen(str(b.category), 100),
+        str(b.date),
+        int(b.duration),
+        user.id
+      ),
+      ...lessonChildStatements(c.env.DB, b, lessonId),
+    ]);
     const row = await c.env.DB.prepare("SELECT * FROM lessons WHERE id = ?").bind(lessonId).first<any>();
     return json({ lesson: mapLesson(row) }, 201);
   } catch (e) {
@@ -1038,39 +1266,30 @@ app.put("/api/lessons/:id", async (c) => {
   try {
     await requireRoles(c, ["admin", "teacher"]);
     const lessonId = c.req.param("id");
+    const existing = await c.env.DB.prepare("SELECT id FROM lessons WHERE id = ?").bind(lessonId).first();
+    if (!existing) return notFound("Lesson not found");
     const b = await readBody(c);
-    await c.env.DB.prepare(
-      `UPDATE lessons SET title=?, description=?, age_group=?, category=?, lesson_date=?, duration=?, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?`
-    )
-      .bind(str(b.title), str(b.description), str(b.ageGroup), str(b.category), str(b.date), int(b.duration), lessonId)
-      .run();
-
-    // Replace relations
-    await c.env.DB.prepare("DELETE FROM lesson_objectives WHERE lesson_id = ?").bind(lessonId).run();
-    await c.env.DB.prepare("DELETE FROM lesson_materials WHERE lesson_id = ?").bind(lessonId).run();
-    await c.env.DB.prepare("DELETE FROM lesson_activities WHERE lesson_id = ?").bind(lessonId).run();
-
-    for (const obj of Array.isArray(b.objectives) ? b.objectives : []) {
-      const text = str(obj)?.trim();
-      if (text) await c.env.DB.prepare("INSERT INTO lesson_objectives (id, lesson_id, text) VALUES (?, ?, ?)")
-        .bind(id(), lessonId, text).run();
-    }
-    for (const mat of Array.isArray(b.materials) ? b.materials : []) {
-      const name = str(mat)?.trim();
-      if (name) await c.env.DB.prepare("INSERT INTO lesson_materials (id, lesson_id, name) VALUES (?, ?, ?)")
-        .bind(id(), lessonId, name).run();
-    }
-    for (const activity of Array.isArray(b.activities) ? b.activities : []) {
-      const name = str(activity.name)?.trim();
-      if (!name) continue;
-      const mats = Array.isArray(activity.materials) ? activity.materials.join("|") : "";
-      await c.env.DB.prepare(
-        "INSERT INTO lesson_activities (id, lesson_id, name, description, duration, materials) VALUES (?, ?, ?, ?, ?, ?)"
-      ).bind(id(), lessonId, name, str(activity.description), int(activity.duration), mats).run();
-    }
-
-    const row = await c.env.DB.prepare("SELECT * FROM lessons WHERE id = ?").bind(lessonId).first<any>();
-    return json({ lesson: mapLesson(row) });
+    const invalid = validateLessonCore(b);
+    if (invalid) return error(invalid);
+    // Replace relations atomically with the lesson update.
+    await c.env.DB.batch([
+      c.env.DB.prepare(
+        `UPDATE lessons SET title=?, description=?, age_group=?, category=?, lesson_date=?, duration=?, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?`
+      ).bind(
+        str(b.title)?.trim(),
+        clampLen(str(b.description), 5000),
+        clampLen(str(b.ageGroup), 30),
+        clampLen(str(b.category), 100),
+        str(b.date),
+        int(b.duration),
+        lessonId
+      ),
+      c.env.DB.prepare("DELETE FROM lesson_objectives WHERE lesson_id = ?").bind(lessonId),
+      c.env.DB.prepare("DELETE FROM lesson_materials WHERE lesson_id = ?").bind(lessonId),
+      c.env.DB.prepare("DELETE FROM lesson_activities WHERE lesson_id = ?").bind(lessonId),
+      ...lessonChildStatements(c.env.DB, b, lessonId),
+    ]);
+    return await lessonDetailResponse(c, lessonId);
   } catch (e) {
     return handleError(e);
   }
@@ -1082,6 +1301,7 @@ app.delete("/api/lessons/:id", async (c) => {
     const lessonId = c.req.param("id");
     const row = await c.env.DB.prepare("SELECT id FROM lessons WHERE id = ?").bind(lessonId).first();
     if (!row) return notFound("Lesson not found");
+    // FKs with ON DELETE CASCADE remove objectives/materials/activities.
     await c.env.DB.prepare("DELETE FROM lessons WHERE id = ?").bind(lessonId).run();
     return json({ ok: true });
   } catch (e) {
@@ -1090,7 +1310,7 @@ app.delete("/api/lessons/:id", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// Partners
+// Partners (admin only — partners are organizations, not data-access roles)
 // ---------------------------------------------------------------------------
 app.get("/api/partners", async (c) => {
   try {
@@ -1106,7 +1326,7 @@ app.post("/api/partners", async (c) => {
   try {
     await requireRoles(c, ["admin"]);
     const b = await readBody(c);
-    const name = str(b.name)?.trim();
+    const name = clampLen(str(b.name)?.trim() ?? null, 200);
     if (!name) return error("Partner name is required");
     const partnerId = id();
     await c.env.DB.prepare(
@@ -1116,14 +1336,14 @@ app.post("/api/partners", async (c) => {
       .bind(
         partnerId,
         name,
-        str(b.contactPerson),
-        str(b.email),
-        str(b.phone),
-        str(b.partnershipType),
-        str(b.contributionAmount),
-        str(b.lastContribution),
-        str(b.nextMeeting),
-        str(b.notes),
+        clampLen(str(b.contactPerson), 150),
+        clampLen(str(b.email)?.toLowerCase() ?? null, 254),
+        clampLen(str(b.phone), 50),
+        clampLen(str(b.partnershipType), 100),
+        clampLen(str(b.contributionAmount), 100),
+        clampLen(str(b.lastContribution), 30),
+        clampLen(str(b.nextMeeting), 30),
+        clampLen(str(b.notes), 2000),
         str(b.status) || "active"
       )
       .run();
@@ -1138,26 +1358,29 @@ app.put("/api/partners/:id", async (c) => {
   try {
     await requireRoles(c, ["admin"]);
     const partnerId = c.req.param("id");
+    const existing = await c.env.DB.prepare("SELECT id FROM partners WHERE id = ?").bind(partnerId).first();
+    if (!existing) return notFound("Partner not found");
     const b = await readBody(c);
+    const name = clampLen(str(b.name)?.trim() ?? null, 200);
+    if (!name) return error("Partner name is required");
     await c.env.DB.prepare(
       `UPDATE partners SET name=?, contact_person=?, email=?, phone=?, partnership_type=?, contribution_amount=?, last_contribution=?, next_meeting=?, notes=?, status=?, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?`
     )
       .bind(
-        str(b.name),
-        str(b.contactPerson),
-        str(b.email),
-        str(b.phone),
-        str(b.partnershipType),
-        str(b.contributionAmount),
-        str(b.lastContribution),
-        str(b.nextMeeting),
-        str(b.notes),
+        name,
+        clampLen(str(b.contactPerson), 150),
+        clampLen(str(b.email)?.toLowerCase() ?? null, 254),
+        clampLen(str(b.phone), 50),
+        clampLen(str(b.partnershipType), 100),
+        clampLen(str(b.contributionAmount), 100),
+        clampLen(str(b.lastContribution), 30),
+        clampLen(str(b.nextMeeting), 30),
+        clampLen(str(b.notes), 2000),
         str(b.status) || "active",
         partnerId
       )
       .run();
     const row = await c.env.DB.prepare("SELECT * FROM partners WHERE id = ?").bind(partnerId).first<any>();
-    if (!row) return notFound("Partner not found");
     return json({ partner: mapPartner(row) });
   } catch (e) {
     return handleError(e);
@@ -1182,14 +1405,14 @@ app.delete("/api/partners/:id", async (c) => {
 // ---------------------------------------------------------------------------
 app.get("/api/reports/summary", async (c) => {
   try {
-    const user = await requireRoles(c, ["admin", "teacher"]);
+    await requireRoles(c, ["admin", "teacher"]);
+    const today = todayISO(c.env.APP_TIMEZONE);
     const totalChildren = (await c.env.DB.prepare("SELECT COUNT(*) AS n FROM children").first<any>())?.n ?? 0;
     const totalTeachers = (await c.env.DB.prepare("SELECT COUNT(*) AS n FROM users WHERE role IN ('teacher','admin')").first<any>())?.n ?? 0;
     const totalLessons = (await c.env.DB.prepare("SELECT COUNT(*) AS n FROM lessons").first<any>())?.n ?? 0;
     const totalEvents = (await c.env.DB.prepare("SELECT COUNT(*) AS n FROM events").first<any>())?.n ?? 0;
-    const upcomingEvents = (await c.env.DB.prepare("SELECT COUNT(*) AS n FROM events WHERE start_date >= ?").bind(todayISO()).first<any>())?.n ?? 0;
+    const upcomingEvents = (await c.env.DB.prepare("SELECT COUNT(*) AS n FROM events WHERE start_date >= ?").bind(today).first<any>())?.n ?? 0;
     const totalPartners = (await c.env.DB.prepare("SELECT COUNT(*) AS n FROM partners").first<any>())?.n ?? 0;
-    const today = todayISO();
     const presentToday = (await c.env.DB.prepare(
       "SELECT COUNT(DISTINCT ar.child_id) AS n FROM attendance_records ar JOIN attendance_sessions s ON s.id = ar.session_id WHERE s.date = ?"
     ).bind(today).first<any>())?.n ?? 0;
@@ -1295,10 +1518,12 @@ app.get("/api/reports/analytics", async (c) => {
 
     // --- Check-in time distribution (bucketed by hour) ---
     const checkinHours = await c.env.DB.prepare(
-      "SELECT substr(checked_in_at, 12, 2) AS hour, COUNT(*) AS count FROM attendance_records GROUP BY hour"
+      "SELECT substr(checked_in_at, 12, 2) AS hour, COUNT(*) AS count FROM attendance_records WHERE checked_in_at IS NOT NULL GROUP BY hour"
     ).all<any>();
     const hourMap: Record<string, number> = {};
-    for (const r of checkinHours.results) hourMap[r.hour] = r.count;
+    for (const r of checkinHours.results) {
+      if (r.hour !== null && r.hour !== undefined) hourMap[String(r.hour)] = r.count;
+    }
     const hourKeys = Object.keys(hourMap).sort();
     const checkInTimes = hourKeys.map((h) => {
       const hh = parseInt(h, 10);
@@ -1353,13 +1578,27 @@ app.get("/api/reports/analytics", async (c) => {
 // ---------------------------------------------------------------------------
 app.post("/api/upload", async (c) => {
   try {
-    await requireRoles(c, ["admin", "teacher", "parent", "volunteer", "cellLeader", "partner"]);
+    await requireRoles(c, ["admin", "teacher", "parent", "volunteer", "cellLeader"]);
     const form = await c.req.formData();
-    const file = form.get("file") as File | null;
+    // workers-types types FormData.get() as `string | null`, but the runtime
+    // yields `File | string` for uploaded files — cast accordingly.
+    const file = form.get("file") as unknown as File | null;
     if (!file) return error("No file uploaded");
+
+    // Validate the extension against an explicit allowlist. The stored
+    // Content-Type is derived from the extension, never from the client, so
+    // uploaded objects can never execute or impersonate other content types.
+    const ext = (file.name?.split(".").pop() ?? "").toLowerCase();
+    const contentType = ALLOWED_UPLOAD_TYPES[ext];
+    if (!contentType) return error("Unsupported file type. Allowed: JPG, PNG, WEBP, GIF", 415);
+    if (file.size === 0) return error("File is empty", 400);
+    if (file.size > MAX_UPLOAD_BYTES) return error("File too large (max 5 MB)", 413);
+
     const key = `uploads/${Date.now()}-${id()}`;
+    const originalName = clampLen(file.name, 255);
     await c.env.MEDIA.put(key, file.stream(), {
-      httpMetadata: { contentType: file.type },
+      httpMetadata: { contentType },
+      customMetadata: originalName ? { originalName } : undefined,
     });
     return json({ url: `/media/${key}`, key });
   } catch (e) {
@@ -1367,12 +1606,16 @@ app.post("/api/upload", async (c) => {
   }
 });
 
-app.get("/media/:key*", async (c) => {
+app.get("/media/*", async (c) => {
   const key = c.req.path.replace(/^\/media\//, "");
   const obj = await c.env.MEDIA.get(key);
   if (!obj) return notFound("Object not found");
   return new Response(obj.body as ReadableStream, {
-    headers: { "Content-Type": obj.httpMetadata?.contentType || "application/octet-stream", "Cache-Control": "public, max-age=31536000" },
+    headers: {
+      "Content-Type": obj.httpMetadata?.contentType || "application/octet-stream",
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Security-Policy": "default-src 'none'",
+    },
   });
 });
 

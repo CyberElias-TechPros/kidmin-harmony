@@ -4,66 +4,71 @@
 @tailwind utilities;
 
 @layer base {
+  /*
+   * "Honey & Pine" palette.
+   * Light: warm honey-toned neutrals with a deep pine-teal primary.
+   * Dark:  pine-toned warm darks with a brighter teal primary.
+   */
   :root {
-    --background: 0 0% 99%;
-    --foreground: 229 23% 12%;
+    --background: 40 33% 98%;
+    --foreground: 180 15% 14%;
 
     --card: 0 0% 100%;
-    --card-foreground: 229 23% 12%;
+    --card-foreground: 180 15% 14%;
 
     --popover: 0 0% 100%;
-    --popover-foreground: 229 23% 12%;
+    --popover-foreground: 180 15% 14%;
 
-    --primary: 225 90% 60%;
-    --primary-foreground: 0 0% 100%;
+    --primary: 173 80% 28%;
+    --primary-foreground: 40 33% 98%;
 
-    --secondary: 223 21% 96%;
-    --secondary-foreground: 229 23% 12%;
+    --secondary: 40 30% 94%;
+    --secondary-foreground: 180 15% 14%;
 
-    --muted: 223 21% 96%;
-    --muted-foreground: 229 12% 45%;
+    --muted: 40 25% 94%;
+    --muted-foreground: 30 10% 42%;
 
-    --accent: 223 21% 96%;
-    --accent-foreground: 229 23% 12%;
+    --accent: 35 45% 92%;
+    --accent-foreground: 180 15% 14%;
 
-    --destructive: 0 84% 60%;
+    --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 100%;
 
-    --border: 229 23% 90%;
-    --input: 229 23% 90%;
-    --ring: 225 90% 60%;
+    --border: 36 20% 88%;
+    --input: 36 20% 88%;
+    --ring: 173 80% 28%;
 
     --radius: 0.75rem;
   }
 
   .dark {
-    --background: 229 23% 8%;
-    --foreground: 0 0% 98%;
+    --background: 180 12% 9%;
+    --foreground: 40 25% 94%;
 
-    --card: 229 23% 10%;
-    --card-foreground: 0 0% 98%;
+    --card: 180 12% 12%;
+    --card-foreground: 40 25% 94%;
 
-    --popover: 229 23% 10%;
-    --popover-foreground: 0 0% 98%;
+    --popover: 180 12% 12%;
+    --popover-foreground: 40 25% 94%;
 
-    --primary: 225 90% 60%;
-    --primary-foreground: 0 0% 100%;
+    --primary: 173 70% 45%;
+    --primary-foreground: 180 12% 9%;
 
-    --secondary: 229 23% 18%;
-    --secondary-foreground: 0 0% 98%;
+    --secondary: 180 10% 16%;
+    --secondary-foreground: 40 25% 94%;
 
-    --muted: 229 23% 18%;
-    --muted-foreground: 0 0% 67%;
+    --muted: 180 10% 16%;
+    --muted-foreground: 30 8% 68%;
 
-    --accent: 229 23% 18%;
-    --accent-foreground: 0 0% 98%;
+    --accent: 180 10% 18%;
+    --accent-foreground: 40 25% 94%;
 
-    --destructive: 0 84% 60%;
-    --destructive-foreground: 0 0% 98%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
 
-    --border: 229 23% 20%;
-    --input: 229 23% 20%;
-    --ring: 225 90% 60%;
+    --border: 180 8% 22%;
+    --input: 180 8% 22%;
+    --ring: 173 70% 45%;
   }
 }
 
@@ -71,66 +76,82 @@
   * {
     @apply border-border;
   }
-  
+
   html {
     @apply scroll-smooth antialiased;
   }
-  
+
   body {
     @apply bg-background text-foreground;
+    font-family: "Manrope Variable", ui-sans-serif, system-ui, sans-serif;
     font-feature-settings: "rlig" 1, "calt" 1;
   }
-  
+
   h1, h2, h3, h4, h5, h6 {
-    @apply font-medium tracking-tight;
+    @apply font-semibold tracking-tight;
   }
-  
+
+  /* Visible focus outline for keyboard users (a11y) */
+  :focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
+  }
+
+  ::selection {
+    background: hsl(var(--primary) / 0.2);
+  }
+
   /* Custom scrollbar */
   ::-webkit-scrollbar {
     @apply w-2;
   }
-  
+
   ::-webkit-scrollbar-track {
     @apply bg-secondary rounded-full;
   }
-  
+
   ::-webkit-scrollbar-thumb {
-    @apply bg-muted-foreground/50 rounded-full hover:bg-muted-foreground/70 transition-colors;
+    @apply bg-muted-foreground/40 rounded-full hover:bg-muted-foreground/60 transition-colors;
   }
 }
 
 @layer components {
   .glass-card {
-    @apply bg-white/40 backdrop-blur-lg border border-white/20 shadow-md;
+    @apply bg-white/60 backdrop-blur-lg border border-white/40 shadow-md;
   }
-  
-  .glass-card-dark {
-    @apply bg-black/20 backdrop-blur-lg border border-white/10 shadow-md;
+
+  .dark .glass-card {
+    @apply bg-white/5 border-white/10;
   }
-  
+
   .page-transition-enter {
     @apply opacity-0;
   }
-  
+
   .page-transition-enter-active {
     @apply opacity-100 transition-opacity duration-300;
   }
-  
+
   .page-transition-exit {
     @apply opacity-100;
   }
-  
+
   .page-transition-exit-active {
     @apply opacity-0 transition-opacity duration-300;
   }
 }
 
-@font-face {
-  font-family: 'Inter var';
-  font-style: normal;
-  font-weight: 100 900;
-  font-display: swap;
-  src: url('https://rsms.me/inter/font-files/Inter-roman.var.woff2?v=3.19') format('woff2');
+/* ---------------------------------------------------------------------------
+   Respect users who prefer reduced motion
+   --------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* ---------------------------------------------------------------------------

@@ -28,7 +28,8 @@ bucket_name = "kidmin-harmony-media"
 [observability]
 enabled = true
 
-# Local development only: enables the /api/auth/seed endpoint to create the
-# demo accounts. Disable/remove this in production.
-[vars]
-SEED_DEMO = "true"
+# NOTE (seeding): the demo-seed endpoint is NOT enabled by default. For local
+# development, put `SEED_DEMO=true` in `.dev.vars` (see .dev.vars.example).
+# In production the variable simply does not exist, so /api/auth/seed always
+# returns 403. Optionally also set the IANA timezone used for "today"
+# (attendance, event status), e.g. APP_TIMEZONE = "Africa/Lagos".

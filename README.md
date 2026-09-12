@@ -19,7 +19,9 @@ ministry partners and view reports.
 │   └── services/api/    # API client + React Query hooks
 ├── worker/              # Cloudflare Worker backend (D1 + R2)
 │   ├── migrations/      # D1 SQL migrations
-│   └── src/index.ts     # Hono API
+│   ├── src/index.ts     # Hono API
+│   └── tests/           # vitest unit tests
+├── scripts/smoke.sh     # 62-check E2E smoke suite (vs local worker)
 ├── vercel.json          # SPA routing + /api proxy to the Worker
 └── .env.example         # example environment variables
 ```
@@ -36,11 +38,15 @@ npm run db:migrate:local
 npm run dev                       # http://127.0.0.1:8787
 ```
 
-Seed demo accounts (once):
+Seed demo accounts (once; requires `SEED_DEMO=true` in `worker/.dev.vars`):
 
 ```bash
 curl -X POST http://127.0.0.1:8787/api/auth/seed
 ```
+
+On a fresh database the seed works unauthenticated (first-admin bootstrap).
+Once any user exists it requires an admin token. In production the endpoint
+is disabled entirely unless `SEED_DEMO` is set.
 
 Frontend (terminal 2, from repo root):
 
@@ -53,6 +59,21 @@ Demo logins: `admin@church.org / admin123`, `teacher@church.org / teacher123`,
 `parent@church.org / parent123`.
 
 Or use the one-click demo buttons on the login page.
+
+## Testing
+
+```bash
+# Worker unit tests (auth, helpers, rate limiting)
+cd worker && npm test && cd ..
+
+# Frontend
+npm run build        # production bundle
+npx tsc --noEmit     # typecheck
+npm run lint         # eslint (0 errors)
+
+# End-to-end smoke suite — with the local Worker running (see above):
+bash scripts/smoke.sh
+```
 
 ## Deploying
 
@@ -89,3 +110,10 @@ See `.env.example`.
 > and admin accounts (teacher, volunteer, cell leader, partner) hold access to
 > children's sensitive data and must be provisioned by an administrator — they
 > cannot be created through the sign-up form or the `/api/auth/register` endpoint.
+>
+> Additional protections, enforced server-side: role checks on every route,
+> PBKDF2-hashed passwords with constant-time verification, HS256-only JWTs
+> (fail-closed 503 if the signing secret is missing/weak), per-IP rate
+> limiting on login and registration, default-deny CORS, upload type
+> allowlisting (stored content type derived from the extension), and strict
+> security headers on all responses including `/media/*`.
