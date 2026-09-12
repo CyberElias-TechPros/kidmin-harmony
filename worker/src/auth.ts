@@ -1,6 +1,13 @@
 // Authentication & authorization helpers for the KidMin Harmony API.
 // Uses WebCrypto (PBKDF2 for passwords, HMAC-SHA256 for JWTs) so no external
 // crypto dependencies are needed on Cloudflare Workers.
+//
+// Security notes:
+// - The Worker fails CLOSED when JWT_SECRET is missing or too short: every
+//   auth-dependent route returns 503 instead of accepting unsigned/weakly
+//   signed tokens.
+// - Token signatures are compared in constant time.
+// - Only HS256 tokens are accepted.
 
 export const ROLES = ["admin", "teacher", "parent", "volunteer", "cellLeader", "partner"] as const;
 export type Role = (typeof ROLES)[number];
@@ -14,6 +21,22 @@ export interface AuthUser {
 }
 
 const enc = new TextEncoder();
+
+/** Minimum length for an acceptable JWT_SECRET. */
+export const MIN_SECRET_LEN = 16;
+
+export class MisconfiguredError extends Error {
+  constructor(message = "JWT_SECRET is not configured (a string of at least 16 characters is required)") {
+    super(message);
+    this.name = "MisconfiguredError";
+  }
+}
+
+export function assertSecret(secret: string | undefined): asserts secret is string {
+  if (typeof secret !== "string" || secret.length < MIN_SECRET_LEN) {
+    throw new MisconfiguredError();
+  }
+}
 
 function toBase64Url(bytes: Uint8Array): string {
   let bin = "";
@@ -32,7 +55,7 @@ function fromBase64Url(str: string): Uint8Array {
 
 // ------------------- JWT (HS256) -------------------
 
-async function hmacSign(secret: string, data: string): Promise<string> {
+async function hmacSign(secret: string, data: string): Promise<Uint8Array> {
   const key = await crypto.subtle.importKey(
     "raw",
     enc.encode(secret),
@@ -41,7 +64,15 @@ async function hmacSign(secret: string, data: string): Promise<string> {
     ["sign"]
   );
   const sig = await crypto.subtle.sign("HMAC", key, enc.encode(data));
-  return toBase64Url(new Uint8Array(sig));
+  return new Uint8Array(sig);
+}
+
+/** Constant-time byte comparison (no early exit). Empty inputs never match. */
+function constantTimeEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length === 0 || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+  return diff === 0;
 }
 
 export async function signToken(
@@ -49,6 +80,7 @@ export async function signToken(
   secret: string,
   expiresInSec = 60 * 60 * 24 * 7
 ): Promise<string> {
+  assertSecret(secret);
   const header = { alg: "HS256", typ: "JWT" };
   const now = Math.floor(Date.now() / 1000);
   const body = {
@@ -60,23 +92,39 @@ export async function signToken(
   const encodedPayload = toBase64Url(enc.encode(JSON.stringify(body)));
   const signingInput = `${encodedHeader}.${encodedPayload}`;
   const signature = await hmacSign(secret, signingInput);
-  return `${signingInput}.${signature}`;
+  return `${signingInput}.${toBase64Url(signature)}`;
 }
 
 export async function verifyToken(
   token: string,
   secret: string
 ): Promise<Record<string, unknown> | null> {
+  assertSecret(secret);
   const parts = token.split(".");
   if (parts.length !== 3) return null;
   const [encodedHeader, encodedPayload, signature] = parts;
-  const signingInput = `${encodedHeader}.${encodedPayload}`;
-  const expected = await hmacSign(secret, signingInput);
-  if (expected !== signature) return null;
+
+  // Reject anything that is not HS256 before doing any work.
+  try {
+    const header = JSON.parse(new TextDecoder().decode(fromBase64Url(encodedHeader)));
+    if (header?.alg !== "HS256") return null;
+  } catch {
+    return null;
+  }
+
+  let provided: Uint8Array;
+  try {
+    provided = fromBase64Url(signature);
+  } catch {
+    return null;
+  }
+  const expected = await hmacSign(secret, `${encodedHeader}.${encodedPayload}`);
+  if (!constantTimeEqual(expected, provided)) return null;
+
   try {
     const payload = JSON.parse(new TextDecoder().decode(fromBase64Url(encodedPayload)));
     const exp = payload.exp as number;
-    if (exp && exp < Math.floor(Date.now() / 1000)) return null;
+    if (typeof exp !== "number" || exp < Math.floor(Date.now() / 1000)) return null;
     return payload as Record<string, unknown>;
   } catch {
     return null;
@@ -87,12 +135,6 @@ export async function verifyToken(
 
 const ITERATIONS = 100_000;
 const HASH_LEN = 32;
-
-function bytesToHex(bytes: Uint8Array): string {
-  return Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
 
 export async function hashPassword(password: string): Promise<string> {
   const salt = crypto.getRandomValues(new Uint8Array(16));
@@ -120,8 +162,12 @@ export async function verifyPassword(password: string, stored: string): Promise<
   try {
     const [iterStr, saltStr, hashStr] = stored.split(":");
     const iterations = parseInt(iterStr, 10);
+    if (!Number.isFinite(iterations) || iterations < 1) return false;
     const salt = fromBase64Url(saltStr);
     const originalHash = fromBase64Url(hashStr);
+    // Reject degenerate stored values up front — empty salt/hash must never
+    // verify successfully (fail closed).
+    if (salt.length === 0 || originalHash.length === 0) return false;
     const keyMaterial = await crypto.subtle.importKey(
       "raw",
       enc.encode(password),
@@ -141,9 +187,7 @@ export async function verifyPassword(password: string, stored: string): Promise<
     );
     const derived = new Uint8Array(bits);
     if (derived.length !== originalHash.length) return false;
-    let diff = 0;
-    for (let i = 0; i < derived.length; i++) diff |= derived[i] ^ originalHash[i];
-    return diff === 0;
+    return constantTimeEqual(derived, originalHash);
   } catch {
     return false;
   }
@@ -163,12 +207,15 @@ export async function authenticate(
   request: Request,
   secret: string
 ): Promise<AuthUser | null> {
+  assertSecret(secret);
   const token = getBearerToken(request);
   if (!token) return null;
   const payload = await verifyToken(token, secret);
   if (!payload) return null;
+  const sub = payload.sub;
+  if (typeof sub !== "string" || sub.length === 0) return null;
   return {
-    id: payload.sub as string,
+    id: sub,
     name: (payload.name as string) ?? "",
     email: (payload.email as string) ?? "",
     role: payload.role as Role,

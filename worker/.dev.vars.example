@@ -1,2 +1,14 @@
 # Copy to .dev.vars for local development (never commit .dev.vars).
+
+# Long random string used to sign/verify JWTs (>= 16 chars required).
+# Example: openssl rand -hex 32
 JWT_SECRET=local-dev-secret-change-me-0123456789
+
+# Local development only: enables POST /api/auth/seed so the demo accounts
+# (admin@church.org / teacher@church.org / parent@church.org) can be created.
+# In production this variable simply does not exist -> the endpoint is 403.
+SEED_DEMO=true
+
+# Optional: IANA timezone used to determine "today" (attendance, event
+# status). Defaults to UTC. Example: APP_TIMEZONE=Africa/Lagos
+APP_TIMEZONE=
