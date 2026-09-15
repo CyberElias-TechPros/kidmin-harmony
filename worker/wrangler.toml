@@ -8,7 +8,7 @@
 #   5. `npm run db:migrate:remote`
 #   6. `npm run deploy`
 
-name = "kidmin-harmony-api"
+name = "kidmin-harmony"
 main = "src/index.ts"
 compatibility_date = "2024-09-01"
 compatibility_flags = ["nodejs_compat"]
