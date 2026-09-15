@@ -17,7 +17,7 @@ compatibility_flags = ["nodejs_compat"]
 [[d1_databases]]
 binding = "DB"
 database_name = "kidmin-harmony-db"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "3f22a119-f2e8-4205-bab6-fc806fe9463d"
 migrations_dir = "migrations"
 
 # Bind the R2 bucket for file / image uploads.
