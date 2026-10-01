@@ -4,11 +4,11 @@
   "rewrites": [
     {
       "source": "/api/(.*)",
-      "destination": "https://${WORKER_URL}/api/$1"
+      "destination": "https://kidmin-harmony.autumn-surf-21ec.workers.dev/api/$1"
     },
     {
       "source": "/media/(.*)",
-      "destination": "https://${WORKER_URL}/media/$1"
+      "destination": "https://kidmin-harmony.autumn-surf-21ec.workers.dev/media/$1"
     },
     {
       "source": "/(.*)",
