@@ -1,0 +1,14 @@
+name: tmp-cleanup-qa
+on: workflow_dispatch
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+    steps:
+      - name: Delete QA test user
+        run: |
+          U="d42c4104-6df4-4f97-9f14-936a8e59a29b"
+          npx -y wrangler@latest d1 execute kidmin-harmony-db --remote --command "DELETE FROM users WHERE id='$U';"
+          npx -y wrangler@latest d1 execute kidmin-harmony-db --remote --command "SELECT count(*) AS remaining FROM users WHERE id='$U';"
